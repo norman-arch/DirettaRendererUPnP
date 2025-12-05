@@ -383,15 +383,22 @@ int UPnPDevice::actionSetAVTransportURI(UpnpActionRequest* request) {
     
     std::cout << "[UPnPDevice] SetAVTransportURI: " << uri << std::endl;
     
-    {
-        std::lock_guard<std::mutex> lock(m_stateMutex);
-        m_currentURI = uri;
-        m_currentMetadata = metadata;
-        m_currentTrackURI = uri;
-        m_currentTrackMetadata = metadata;
-        m_currentPosition = 0;
-        m_trackDuration = 0;
+{
+    std::lock_guard<std::mutex> lock(m_stateMutex);
+    m_currentURI = uri;
+    m_currentMetadata = metadata;
+    m_currentTrackURI = uri;
+    m_currentTrackMetadata = metadata;
+    m_currentPosition = 0;
+    m_trackDuration = 0;
+    
+    // Effacer l'ancienne queue gapless (nouveau contexte)
+    if (!m_nextURI.empty()) {
+        std::cout << "[UPnPDevice] ✓ Clearing old gapless queue (new context)" << std::endl;
+        m_nextURI.clear();
+        m_nextMetadata.clear();
     }
+}
     
     // Callback
     if (m_callbacks.onSetURI) {
@@ -489,13 +496,20 @@ int UPnPDevice::actionStop(UpnpActionRequest* request) {
     std::cout << "[UPnPDevice] ⛔ STOP ACTION RECEIVED" << std::endl;
     std::cout << "════════════════════════════════════════" << std::endl;
     
-    {
-        std::lock_guard<std::mutex> lock(m_stateMutex);
-        std::cout << "[UPnPDevice] Changing state: " << m_transportState 
-                  << " → STOPPED" << std::endl;
-        m_transportState = "STOPPED";
-        m_currentPosition = 0;
+{
+    std::lock_guard<std::mutex> lock(m_stateMutex);
+    std::cout << "[UPnPDevice] Changing state: " << m_transportState 
+              << " → STOPPED" << std::endl;
+    m_transportState = "STOPPED";
+    m_currentPosition = 0;
+    
+    // Effacer la queue gapless
+    if (!m_nextURI.empty()) {
+        std::cout << "[UPnPDevice] ✓ Clearing gapless queue: " << m_nextURI << std::endl;
+        m_nextURI.clear();
+        m_nextMetadata.clear();
     }
+}
     
     // Callback
     if (m_callbacks.onStop) {
@@ -857,6 +871,26 @@ std::string UPnPDevice::generateAVTransportSCPD() {
       </argumentList>
     </action>
     <action>
+      <name>SetNextAVTransportURI</name>
+      <argumentList>
+        <argument>
+          <name>InstanceID</name>
+          <direction>in</direction>
+          <relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable>
+        </argument>
+        <argument>
+          <name>NextURI</name>
+          <direction>in</direction>
+          <relatedStateVariable>NextAVTransportURI</relatedStateVariable>
+        </argument>
+        <argument>
+          <name>NextURIMetaData</name>
+          <direction>in</direction>
+          <relatedStateVariable>NextAVTransportURIMetaData</relatedStateVariable>
+        </argument>
+      </argumentList>
+    </action>
+    <action>
       <name>Play</name>
       <argumentList>
         <argument>
@@ -883,6 +917,46 @@ std::string UPnPDevice::generateAVTransportSCPD() {
     </action>
     <action>
       <name>Pause</name>
+      <argumentList>
+        <argument>
+          <name>InstanceID</name>
+          <direction>in</direction>
+          <relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable>
+        </argument>
+      </argumentList>
+    </action>
+    <action>
+      <name>Seek</name>
+      <argumentList>
+        <argument>
+          <name>InstanceID</name>
+          <direction>in</direction>
+          <relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable>
+        </argument>
+        <argument>
+          <name>Unit</name>
+          <direction>in</direction>
+          <relatedStateVariable>A_ARG_TYPE_SeekMode</relatedStateVariable>
+        </argument>
+        <argument>
+          <name>Target</name>
+          <direction>in</direction>
+          <relatedStateVariable>A_ARG_TYPE_SeekTarget</relatedStateVariable>
+        </argument>
+      </argumentList>
+    </action>
+    <action>
+      <name>Next</name>
+      <argumentList>
+        <argument>
+          <name>InstanceID</name>
+          <direction>in</direction>
+          <relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable>
+        </argument>
+      </argumentList>
+    </action>
+    <action>
+      <name>Previous</name>
       <argumentList>
         <argument>
           <name>InstanceID</name>
@@ -951,11 +1025,73 @@ std::string UPnPDevice::generateAVTransportSCPD() {
         </argument>
       </argumentList>
     </action>
+    <action>
+      <name>GetMediaInfo</name>
+      <argumentList>
+        <argument>
+          <name>InstanceID</name>
+          <direction>in</direction>
+          <relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable>
+        </argument>
+        <argument>
+          <name>NrTracks</name>
+          <direction>out</direction>
+          <relatedStateVariable>NumberOfTracks</relatedStateVariable>
+        </argument>
+        <argument>
+          <name>MediaDuration</name>
+          <direction>out</direction>
+          <relatedStateVariable>CurrentMediaDuration</relatedStateVariable>
+        </argument>
+        <argument>
+          <name>CurrentURI</name>
+          <direction>out</direction>
+          <relatedStateVariable>AVTransportURI</relatedStateVariable>
+        </argument>
+        <argument>
+          <name>CurrentURIMetaData</name>
+          <direction>out</direction>
+          <relatedStateVariable>AVTransportURIMetaData</relatedStateVariable>
+        </argument>
+        <argument>
+          <name>NextURI</name>
+          <direction>out</direction>
+          <relatedStateVariable>NextAVTransportURI</relatedStateVariable>
+        </argument>
+        <argument>
+          <name>NextURIMetaData</name>
+          <direction>out</direction>
+          <relatedStateVariable>NextAVTransportURIMetaData</relatedStateVariable>
+        </argument>
+        <argument>
+          <name>PlayMedium</name>
+          <direction>out</direction>
+          <relatedStateVariable>PlaybackStorageMedium</relatedStateVariable>
+        </argument>
+        <argument>
+          <name>RecordMedium</name>
+          <direction>out</direction>
+          <relatedStateVariable>RecordStorageMedium</relatedStateVariable>
+        </argument>
+      </argumentList>
+    </action>
   </actionList>
   <serviceStateTable>
     <stateVariable sendEvents="no">
       <name>A_ARG_TYPE_InstanceID</name>
       <dataType>ui4</dataType>
+    </stateVariable>
+    <stateVariable sendEvents="no">
+      <name>A_ARG_TYPE_SeekMode</name>
+      <dataType>string</dataType>
+      <allowedValueList>
+        <allowedValue>REL_TIME</allowedValue>
+        <allowedValue>TRACK_NR</allowedValue>
+      </allowedValueList>
+    </stateVariable>
+    <stateVariable sendEvents="no">
+      <name>A_ARG_TYPE_SeekTarget</name>
+      <dataType>string</dataType>
     </stateVariable>
     <stateVariable sendEvents="no">
       <name>AVTransportURI</name>
@@ -965,6 +1101,14 @@ std::string UPnPDevice::generateAVTransportSCPD() {
       <name>AVTransportURIMetaData</name>
       <dataType>string</dataType>
     </stateVariable>
+    <stateVariable sendEvents="no">
+      <name>NextAVTransportURI</name>
+      <dataType>string</dataType>
+    </stateVariable>
+    <stateVariable sendEvents="no">
+      <name>NextAVTransportURIMetaData</name>
+      <dataType>string</dataType>
+    </stateVariable>
     <stateVariable sendEvents="yes">
       <name>TransportState</name>
       <dataType>string</dataType>
@@ -972,6 +1116,7 @@ std::string UPnPDevice::generateAVTransportSCPD() {
         <allowedValue>STOPPED</allowedValue>
         <allowedValue>PLAYING</allowedValue>
         <allowedValue>PAUSED_PLAYBACK</allowedValue>
+        <allowedValue>TRANSITIONING</allowedValue>
       </allowedValueList>
     </stateVariable>
     <stateVariable sendEvents="no">
@@ -987,11 +1132,19 @@ std::string UPnPDevice::generateAVTransportSCPD() {
       <dataType>string</dataType>
     </stateVariable>
     <stateVariable sendEvents="no">
+      <name>NumberOfTracks</name>
+      <dataType>ui4</dataType>
+    </stateVariable>
+    <stateVariable sendEvents="no">
       <name>CurrentTrack</name>
       <dataType>ui4</dataType>
     </stateVariable>
     <stateVariable sendEvents="no">
       <name>CurrentTrackDuration</name>
+      <dataType>string</dataType>
+    </stateVariable>
+    <stateVariable sendEvents="no">
+      <name>CurrentMediaDuration</name>
       <dataType>string</dataType>
     </stateVariable>
     <stateVariable sendEvents="no">
@@ -1005,6 +1158,20 @@ std::string UPnPDevice::generateAVTransportSCPD() {
     <stateVariable sendEvents="no">
       <name>RelativeTimePosition</name>
       <dataType>string</dataType>
+    </stateVariable>
+    <stateVariable sendEvents="no">
+      <name>PlaybackStorageMedium</name>
+      <dataType>string</dataType>
+      <allowedValueList>
+        <allowedValue>NETWORK</allowedValue>
+      </allowedValueList>
+    </stateVariable>
+    <stateVariable sendEvents="no">
+      <name>RecordStorageMedium</name>
+      <dataType>string</dataType>
+      <allowedValueList>
+        <allowedValue>NOT_IMPLEMENTED</allowedValue>
+      </allowedValueList>
     </stateVariable>
   </serviceStateTable>
 </scpd>
