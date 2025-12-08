@@ -281,8 +281,6 @@ bool AudioDecoder::open(const std::string& url) {
             break;
     }
 
-PAR:
-----
     m_rawDSD = false;  // Not DSD, use normal decoding
     
     // ⭐ CRITICAL FIX: Detect REAL bit depth from source
