@@ -4,7 +4,7 @@
 
 This guide explains how to run the Diretta UPnP Renderer as a systemd service, allowing automatic startup on boot and easy management.
 
-**Credits:** Service configuration based on recommendations from **Piero** (AudioLinux developer), approved by Yu Harada.
+**Credits:** Service configuration based on recommendations from **olm52** (AudioLinux developer).
 
 ---
 
