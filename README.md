@@ -302,7 +302,7 @@ sudo ./install-systemd.sh
      sudo systemctl stop diretta-renderer
  8. Disable auto-start:
      sudo systemctl disable diretta-renderer       
-
+```
 
 ### 4. Configure Network
 
