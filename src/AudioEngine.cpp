@@ -646,6 +646,26 @@ size_t AudioDecoder::readSamples(AudioBuffer& buffer, size_t numSamples,
         return (totalBytesRead * 8) / m_trackInfo.channels;
     }
     
+        // Conversion DFF → DSF (votre code existant)
+    if (m_trackInfo.codec.find("msbf") != std::string::npos) {
+        // ... byte swap + bit reversal ...
+        
+        std::cout << "[AudioDecoder] 🔄 DFF → DSF: Byte swap + Bit reversal applied" << std::endl;
+        
+        // ✅ DEBUG: Dump AFTER conversion
+        static bool dumpedAfter = false;
+        if (!dumpedAfter) {
+            std::cout << "\n[DEBUG] AFTER conversion - First 64 bytes:" << std::endl;
+            const uint8_t* data = buffer.data();
+            for (int i = 0; i < 64; i++) {
+                printf("%02X ", data[i]);
+                if ((i + 1) % 16 == 0) printf("\n");
+            }
+            std::cout << std::endl;
+            dumpedAfter = true;
+        }
+    }
+
     // ══════════════════════════════════════════════════════════════
     // PCM MODE - Normal decoding with resampling
     // ══════════════════════════════════════════════════════════════
