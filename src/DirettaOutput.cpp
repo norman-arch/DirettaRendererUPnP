@@ -32,7 +32,7 @@ void DirettaOutput::setMTU(uint32_t mtu) {
     m_mtu = mtu;
     m_mtuManuallySet = true;
     
-    std::cout << "[DirettaOutput] ✓ MTU configured: " << m_mtu << " bytes";
+    DEBUG_LOG("[DirettaOutput] ✓ MTU configured: " << m_mtu << " bytes";
     
     if (mtu > 1500) {
         std::cout << " (jumbo frames)";
@@ -44,14 +44,14 @@ void DirettaOutput::setMTU(uint32_t mtu) {
 
 
 bool DirettaOutput::open(const AudioFormat& format, int bufferSeconds) {
-    std::cout << "[DirettaOutput] Opening: " 
+    DEBUG_LOG("[DirettaOutput] Opening: " 
               << format.sampleRate << "Hz/" 
               << format.bitDepth << "bit/" 
               << format.channels << "ch" << std::endl;
     
     m_currentFormat = format;
     m_totalSamplesSent = 0;
-    std::cout << "[DirettaOutput] ⭐ m_totalSamplesSent RESET to 0" << std::endl; 
+    DEBUG_LOG("[DirettaOutput] ⭐ m_totalSamplesSent RESET to 0" << std::endl; 
     
     // ✅ INTELLIGENT BUFFER ADAPTATION based on processing complexity
     //
@@ -68,36 +68,36 @@ bool DirettaOutput::open(const AudioFormat& format, int bufferSeconds) {
     if (format.isDSD) {
         // DSD: Raw bitstream, zero decode overhead
         effectiveBuffer = std::min(static_cast<float>(bufferSeconds), 0.8f);
-        std::cout << "[DirettaOutput] 🎵 DSD: raw bitstream path" << std::endl;
+        DEBUG_LOG("[DirettaOutput] 🎵 DSD: raw bitstream path" << std::endl;
         
     } else if (!format.isCompressed) {
         // WAV/AIFF: Uncompressed PCM, minimal overhead (just format conversion)
         effectiveBuffer = std::min(static_cast<float>(bufferSeconds), 0.8f);
-        std::cout << "[DirettaOutput] ✓ Uncompressed PCM (WAV/AIFF): low-latency path" << std::endl;
-        std::cout << "[DirettaOutput]   Buffer: " << effectiveBuffer 
+        DEBUG_LOG("[DirettaOutput] ✓ Uncompressed PCM (WAV/AIFF): low-latency path" << std::endl;
+        DEBUG_LOG("[DirettaOutput]   Buffer: " << effectiveBuffer 
                   << "s (similar to DSD!)" << std::endl;
         
     } else {
         // FLAC/ALAC/etc: Compressed, needs decoding buffer
         effectiveBuffer = std::max(static_cast<float>(bufferSeconds), 0.8f);
-        std::cout << "[DirettaOutput] ℹ️  Compressed PCM (FLAC/ALAC): decoding required" << std::endl;
+        DEBUG_LOG("[DirettaOutput] ℹ️  Compressed PCM (FLAC/ALAC): decoding required" << std::endl;
         
         if (bufferSeconds < 2) {
-            std::cout << "[DirettaOutput]   Using 2s minimum for decode stability" << std::endl;
+            DEBUG_LOG("[DirettaOutput]   Using 2s minimum for decode stability" << std::endl;
         }
     }
     
     m_bufferSeconds = effectiveBuffer;
-    std::cout << "[DirettaOutput] → Effective buffer: " << m_bufferSeconds << "s" << std::endl;
+    DEBUG_LOG("[DirettaOutput] → Effective buffer: " << m_bufferSeconds << "s" << std::endl;
     
     // Find Diretta target
-    std::cout << "[DirettaOutput] Finding Diretta target..." << std::endl;
+    DEBUG_LOG("[DirettaOutput] Finding Diretta target..." << std::endl;
     if (!findAndSelectTarget(m_targetIndex)) {  // Use configured target index
         std::cerr << "[DirettaOutput] ❌ Failed to find or select Diretta target" << std::endl;
         return false;
     }
     
-    std::cout << "[DirettaOutput] ✓ Found Diretta target" << std::endl;
+    DEBUG_LOG("[DirettaOutput] ✓ Found Diretta target") << std::endl;
     
     // Configure and connect
     if (!configureDiretta(format)) {
@@ -116,17 +116,17 @@ void DirettaOutput::close() {
         return;
     }
     
-    std::cout << "[DirettaOutput] Closing..." << std::endl;
+    DEBUG_LOG("[DirettaOutput] Closing...") << std::endl;
     
     // ⚠️  Don't call stop() here if already stopped - avoids double pre_disconnect
     // The onStop callback already called stop(true) for immediate response
     
     // Disconnect SyncBuffer
     if (m_syncBuffer) {
-        std::cout << "[DirettaOutput] Disconnecting SyncBuffer..." << std::endl;
+        DEBUG_LOG("[DirettaOutput] Disconnecting SyncBuffer..." << std::endl;
         // Only disconnect if still playing (avoid double disconnect)
         if (m_playing) {
-            std::cout << "[DirettaOutput] ⚠️  Still playing, forcing immediate disconnect" << std::endl;
+            DEBUG_LOG("[DirettaOutput] ⚠️  Still playing, forcing immediate disconnect" << std::endl;
             m_syncBuffer->pre_disconnect(true); // Immediate
         }
         m_syncBuffer.reset();
@@ -150,7 +150,7 @@ bool DirettaOutput::play() {
         return true; // Already playing
     }
     
-    std::cout << "[DirettaOutput] Starting playback..." << std::endl;
+    DEBUG_LOG("[DirettaOutput] Starting playback..." << std::endl;
     
     if (!m_syncBuffer) {
         std::cerr << "[DirettaOutput] ❌ SyncBuffer not initialized" << std::endl;
@@ -167,28 +167,28 @@ bool DirettaOutput::play() {
 
 void DirettaOutput::stop(bool immediate) {
     if (!m_playing) {
-        std::cout << "[DirettaOutput] ⚠️  stop() called but not playing" << std::endl;
+        DEBUG_LOG("[DirettaOutput] ⚠️  stop() called but not playing") << std::endl;
         return;
     }
     
-    std::cout << "[DirettaOutput] 🛑 Stopping (immediate=" << immediate << ")..." << std::endl;
+    DEBUG_LOG("[DirettaOutput] 🛑 Stopping (immediate=" << immediate << ")..." << std::endl;
     
     if (m_syncBuffer) {
         if (!immediate) {
             // ⭐ DRAIN buffers before stopping (graceful stop)
-            std::cout << "[DirettaOutput] Draining buffers before stop..." << std::endl;
+            DEBUG_LOG("[DirettaOutput] Draining buffers before stop..." << std::endl;
             int drain_timeout_ms = 5000;
             int drain_waited_ms = 0;
             
             while (drain_waited_ms < drain_timeout_ms) {
                 if (m_syncBuffer->buffer_empty()) {
-                    std::cout << "[DirettaOutput] ✓ Buffers drained" << std::endl;
+                    DEBUG_LOG("[DirettaOutput] ✓ Buffers drained") << std::endl;
                     break;
                 }
                 
                 if (drain_waited_ms % 200 == 0) {
                     size_t buffered = m_syncBuffer->getLastBufferCount();
-                    std::cout << "[DirettaOutput]    Waiting... (" << buffered << " samples buffered)" << std::endl;
+                    DEBUG_LOG("[DirettaOutput]    Waiting... (" << buffered << " samples buffered)" << std::endl;
                 }
                 
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -201,17 +201,17 @@ void DirettaOutput::stop(bool immediate) {
             }
         }
         
-        std::cout << "[DirettaOutput] Calling pre_disconnect(" << immediate << ")..." << std::endl;
+        DEBUG_LOG("[DirettaOutput] Calling pre_disconnect(" << immediate << ")..." << std::endl;
         auto start = std::chrono::steady_clock::now();
         
         m_syncBuffer->pre_disconnect(immediate);
         
         auto end = std::chrono::steady_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-        std::cout << "[DirettaOutput] ✓ pre_disconnect completed in " << duration.count() << "ms" << std::endl;
-        std::cout << "[DirettaOutput] Calling seek_front() to reset buffer..." << std::endl;
+        DEBUG_LOG("[DirettaOutput] ✓ pre_disconnect completed in " << duration.count() << "ms" << std::endl;
+        DEBUG_LOG("[DirettaOutput] Calling seek_front() to reset buffer..." << std::endl;
         m_syncBuffer->seek_front();
-        std::cout << "[DirettaOutput] ✓ Buffer reset to front" << std::endl;
+        DEBUG_LOG("[DirettaOutput] ✓ Buffer reset to front") << std::endl;
     } else {
         std::cout << "[DirettaOutput] ⚠️  No SyncBuffer to disconnect" << std::endl;
     }
@@ -220,7 +220,7 @@ void DirettaOutput::stop(bool immediate) {
     m_isPaused = false;      // Reset état pause
     m_pausedPosition = 0;    // Reset position sauvegardée
     m_totalSamplesSent = 0;
-    std::cout << "[DirettaOutput] ⭐ m_totalSamplesSent RESET to 0" << std::endl;
+    DEBUG_LOG("[DirettaOutput] ⭐ m_totalSamplesSent RESET to 0" << std::endl;
     
     std::cout << "[DirettaOutput] ✓ Stopped" << std::endl;
 }
@@ -230,7 +230,7 @@ void DirettaOutput::pause() {
         return;
     }
     
-    std::cout << "[DirettaOutput] ⏸️  Pausing..." << std::endl;
+    DEBUG_LOG("[DirettaOutput] ⏸️  Pausing...") << std::endl;
     
     // Sauvegarder la position actuelle
     m_pausedPosition = m_totalSamplesSent;
@@ -243,7 +243,7 @@ void DirettaOutput::pause() {
     m_isPaused = true;
     m_playing = false;
     
-    std::cout << "[DirettaOutput] ✓ Paused at sample " << m_pausedPosition << std::endl;
+    DEBUG_LOG("[DirettaOutput] ✓ Paused at sample " << m_pausedPosition << std::endl;
 }
 
 void DirettaOutput::resume() {
@@ -251,7 +251,7 @@ void DirettaOutput::resume() {
         return;
     }
     
-    std::cout << "[DirettaOutput] ▶️  Resuming from sample " << m_pausedPosition << "..." << std::endl;
+    DEBUG_LOG("[DirettaOutput] ▶️  Resuming from sample " << m_pausedPosition << "..." << std::endl;
     
     if (m_syncBuffer) {
         // Seek à la position sauvegardée
@@ -306,7 +306,7 @@ bool DirettaOutput::changeFormat(const AudioFormat& newFormat) {
             // Log progress every 200ms
             if (drain_waited_ms % 200 == 0) {
                 size_t buffered = m_syncBuffer->getLastBufferCount();
-                std::cout << "[DirettaOutput]    Waiting... (" << buffered << " samples remaining)" << std::endl;
+                DEBUG_LOG("[DirettaOutput]    Waiting... (" << buffered << " samples remaining)" << std::endl;
             }
             
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -385,7 +385,7 @@ bool DirettaOutput::sendAudio(const uint8_t* data, size_t numSamples) {
         
         static int debugCount = 0;
         if (debugCount++ < 3) {
-            std::cout << "[DirettaOutput::sendAudio] DSD: " << numSamples 
+            DEBUG_LOG("[DirettaOutput::sendAudio] DSD: " << numSamples 
                       << " samples → " << dataSize << " bytes" << std::endl;
         }
     } else {
@@ -436,7 +436,7 @@ if (!m_currentFormat.isDSD && m_currentFormat.bitDepth == 24) {
     static int callCount = 0;
     if (++callCount % 500 == 0) {
         double seconds = static_cast<double>(m_totalSamplesSent) / m_currentFormat.sampleRate;
-        std::cout << "[DirettaOutput] Position: " << seconds << "s (" 
+        DEBUG_LOG("[DirettaOutput] Position: " << seconds << "s (" 
                   << m_totalSamplesSent << " samples)" << std::endl;
     }
 
@@ -481,7 +481,7 @@ bool DirettaOutput::findTarget() {
 // ⭐ TOUJOURS mesurer le MTU physique
     uint32_t measuredMTU = 1500;
     if (find.measSendMTU(m_targetAddress, measuredMTU)) {
-        std::cout << "[DirettaOutput] 📊 Physical MTU measured: " << measuredMTU << " bytes" << std::endl;
+        DEBUG_LOG("[DirettaOutput] 📊 Physical MTU measured: " << measuredMTU << " bytes" << std::endl;
     } else {
         std::cerr << "[DirettaOutput] ⚠️  Failed to measure MTU" << std::endl;
     }
@@ -528,7 +528,7 @@ bool DirettaOutput::findAndSelectTarget(int targetIndex) {
     // If only one target, use it automatically
     if (targets.size() == 1) {
         m_targetAddress = targets.begin()->first;
-        std::cout << "[DirettaOutput] ✓ Auto-selected only available target" << std::endl;
+        DEBUG_LOG("[DirettaOutput] ✓ Auto-selected only available target" << std::endl;
     }
     // Multiple targets: interactive selection
     else {
@@ -588,10 +588,10 @@ bool DirettaOutput::findAndSelectTarget(int targetIndex) {
     
     // Measure MTU for selected target
     uint32_t measuredMTU = 1500;
-    std::cout << "[DirettaOutput] Measuring network MTU..." << std::endl;
+    DEBUG_LOG("[DirettaOutput] Measuring network MTU..." << std::endl;
     
     if (find.measSendMTU(m_targetAddress, measuredMTU)) {
-        std::cout << "[DirettaOutput] 📊 Physical MTU measured: " << measuredMTU << " bytes";
+        DEBUG_LOG("[DirettaOutput] 📊 Physical MTU measured: " << measuredMTU << " bytes";
         
         if (measuredMTU >= 9000) {
             std::cout << " (Jumbo frames enabled! ✓)";
@@ -607,7 +607,7 @@ bool DirettaOutput::findAndSelectTarget(int targetIndex) {
     }
     
     m_mtu = measuredMTU;
-    std::cout << "[DirettaOutput] ✓ MTU configured: " << m_mtu << " bytes" << std::endl;
+    DEBUG_LOG("[DirettaOutput] ✓ MTU configured: " << m_mtu << " bytes" << std::endl;
     std::cout << std::endl;
 
     return true;
@@ -696,8 +696,8 @@ bool DirettaOutput::verifyTargetAvailable() {
     const int RETRY_DELAY_SECONDS = 5;
     
     std::cout << "[DirettaOutput] " << std::endl;
-    std::cout << "[DirettaOutput] Scanning for Diretta targets..." << std::endl;
-    std::cout << "[DirettaOutput] This may take several seconds per attempt" << std::endl;
+    DEBUG_LOG("[DirettaOutput] Scanning for Diretta targets..." << std::endl;
+    DEBUG_LOG("[DirettaOutput] This may take several seconds per attempt" << std::endl;
     std::cout << "[DirettaOutput] " << std::endl;
     
     DIRETTA::Find::Setting findSetting;
@@ -713,7 +713,7 @@ bool DirettaOutput::verifyTargetAvailable() {
         // Create new Find object for each attempt (important!)
         DIRETTA::Find find(findSetting);
         
-        std::cout << "[DirettaOutput] Opening Diretta Find on all network interfaces";
+        DEBUG_LOG("[DirettaOutput] Opening Diretta Find on all network interfaces";
         std::cout.flush();
         
         if (!find.open()) {
@@ -734,7 +734,7 @@ bool DirettaOutput::verifyTargetAvailable() {
         }
         
         std::cout << " ✓" << std::endl;
-        std::cout << "[DirettaOutput] Scanning network";
+        DEBUG_LOG("[DirettaOutput] Scanning network";
         std::cout.flush();
         
         // Visual feedback during scan (SDK blocks here)
@@ -789,7 +789,7 @@ bool DirettaOutput::verifyTargetAvailable() {
         // SUCCESS!
         std::cout << " ✓" << std::endl;
         std::cout << "[DirettaOutput] " << std::endl;
-        std::cout << "[DirettaOutput] ✅ Found " << targets.size() << " Diretta target(s)";
+        DEBUG_LOG("[DirettaOutput] ✅ Found " << targets.size() << " Diretta target(s)";
         if (attempt > 1) {
             std::cout << " (after " << attempt << " attempt(s))";
         }
@@ -800,7 +800,7 @@ bool DirettaOutput::verifyTargetAvailable() {
         int targetNum = 1;
         for (const auto& targetPair : targets) {
             const auto& targetInfo = targetPair.second;
-            std::cout << "[DirettaOutput] Target #" << targetNum << ": " 
+            DEBUG_LOG("[DirettaOutput] Target #" << targetNum << ": " 
           << targetInfo.targetName << std::endl;
             targetNum++;
         }
@@ -820,7 +820,7 @@ bool DirettaOutput::verifyTargetAvailable() {
             std::advance(it, m_targetIndex);
             const auto& targetInfo = it->second;
             
-            std::cout << "[DirettaOutput] ✓ Will use target #" << (m_targetIndex + 1) 
+            DEBUG_LOG("[DirettaOutput] ✓ Will use target #" << (m_targetIndex + 1) 
           << " (" << targetInfo.targetName << ")" << std::endl;
             std::cout << "[DirettaOutput] " << std::endl;
         } else if (targets.size() > 1) {
@@ -836,10 +836,10 @@ bool DirettaOutput::verifyTargetAvailable() {
 }
 
 bool DirettaOutput::configureDiretta(const AudioFormat& format) {
-    std::cout << "[DirettaOutput] Configuring SyncBuffer..." << std::endl;
+    DEBUG_LOG("[DirettaOutput] Configuring SyncBuffer..." << std::endl;
     
     if (!m_syncBuffer) {
-        std::cout << "[DirettaOutput] Creating SyncBuffer..." << std::endl;
+        DEBUG_LOG("[DirettaOutput] Creating SyncBuffer..." << std::endl;
         m_syncBuffer = std::make_unique<DIRETTA::SyncBuffer>();
     }
   
@@ -848,7 +848,7 @@ bool DirettaOutput::configureDiretta(const AudioFormat& format) {
     
     // CRITICAL: DSD FORMAT
     if (format.isDSD) {
-        std::cout << "[DirettaOutput] 🎵 DSD NATIVE MODE" << std::endl;
+        DEBUG_LOG("[DirettaOutput] 🎵 DSD NATIVE MODE") << std::endl;
         
         // ✅ Base DSD format - always use FMT_DSD1 and FMT_DSD_SIZ_32
         formatID = DIRETTA::FormatID::FMT_DSD1 | DIRETTA::FormatID::FMT_DSD_SIZ_32;
@@ -858,28 +858,28 @@ formatID |= DIRETTA::FormatID::FMT_DSD_LSB;
 formatID |= DIRETTA::FormatID::FMT_DSD_LITTLE;
 
 if (format.dsdFormat == AudioFormat::DSDFormat::DFF) {
-    std::cout << "[DirettaOutput]    Format: DSF (LSB + LITTLE) [converted from DFF]" << std::endl;
+    DEBUG_LOG("[DirettaOutput]    Format: DSF (LSB + LITTLE) [converted from DFF]" << std::endl;
 } else {
-    std::cout << "[DirettaOutput]    Format: DSF (LSB + LITTLE)" << std::endl;
+    DEBUG_LOG("[DirettaOutput]    Format: DSF (LSB + LITTLE)" << std::endl;
 }
         
-        std::cout << "[DirettaOutput]    Word size: 32-bit container" << std::endl;
-        std::cout << "[DirettaOutput]    DSD Rate: ";
+        DEBUG_LOG("[DirettaOutput]    Word size: 32-bit container" << std::endl;
+        DEBUG_LOG("[DirettaOutput]    DSD Rate: ";
         
         // Determine DSD rate (DSD64, DSD128, etc.)
         // DSD rates are based on 44.1kHz × 64/128/256/512
         if (format.sampleRate == 2822400) {
             std::cout << "DSD64 (2822400 Hz)" << std::endl;
             formatID |= DIRETTA::FormatID::RAT_44100 | DIRETTA::FormatID::RAT_MP64;
-            std::cout << "[DirettaOutput]    ✅ DSD64 configured" << std::endl;
+            DEBUG_LOG("[DirettaOutput]    ✅ DSD64 configured" << std::endl;
         } else if (format.sampleRate == 5644800) {
             std::cout << "DSD128 (5644800 Hz)" << std::endl;
             formatID |= DIRETTA::FormatID::RAT_44100 | DIRETTA::FormatID::RAT_MP128;
-            std::cout << "[DirettaOutput]    ✅ DSD128 configured" << std::endl;
+            DEBUG_LOG("[DirettaOutput]    ✅ DSD128 configured" << std::endl;
         } else if (format.sampleRate == 11289600) {
             std::cout << "DSD256 (11289600 Hz)" << std::endl;
             formatID |= DIRETTA::FormatID::RAT_44100 | DIRETTA::FormatID::RAT_MP256;
-            std::cout << "[DirettaOutput]    ✅ DSD256 configured" << std::endl;
+            DEBUG_LOG("[DirettaOutput]    ✅ DSD256 configured" << std::endl;
         } else {
             std::cerr << "[DirettaOutput]    ⚠️  Unknown DSD rate: " << format.sampleRate << std::endl;
             formatID |= DIRETTA::FormatID::RAT_44100 | DIRETTA::FormatID::RAT_MP64;
@@ -941,7 +941,7 @@ if (format.dsdFormat == AudioFormat::DSDFormat::DFF) {
         default: formatID |= DIRETTA::FormatID::CHA_2; break;
     }    
      // ===== SYNCBUFFER SETUP (SinHost order) =====
-    std::cout << "[DirettaOutput] 1. Opening..." << std::endl;
+    DEBUG_LOG("[DirettaOutput] 1. Opening..." << std::endl;
     m_syncBuffer->open(
         DIRETTA::Sync::THRED_MODE(1),
         ACQUA::Clock::MilliSeconds(100),
@@ -949,7 +949,7 @@ if (format.dsdFormat == AudioFormat::DSDFormat::DFF) {
         DIRETTA::Sync::MSMODE_AUTO
     );
     
-    std::cout << "[DirettaOutput] 2. Setting sink..." << std::endl;
+    DEBUG_LOG("[DirettaOutput] 2. Setting sink..." << std::endl;
     m_syncBuffer->setSink(
         m_targetAddress,
         ACQUA::Clock::MilliSeconds(100),
@@ -962,10 +962,10 @@ if (format.dsdFormat == AudioFormat::DSDFormat::DFF) {
     // "Need to comply with Target's requirements"
     // Use checkSinkSupport or getSinkConfigure to verify compatibility
     
-    std::cout << "[DirettaOutput] 3. Format negotiation with Target..." << std::endl;
+    DEBUG_LOG("[DirettaOutput] 3. Format negotiation with Target..." << std::endl;
     
     // Try to configure the requested format
-    std::cout << "[DirettaOutput]    Requesting format: ";
+    DEBUG_LOG("[DirettaOutput]    Requesting format: ";
     if (format.isDSD) {
         std::cout << "DSD" << (format.sampleRate / 44100) << " (" << format.sampleRate << "Hz)";
     } else {
@@ -979,7 +979,7 @@ if (format.dsdFormat == AudioFormat::DSDFormat::DFF) {
     DIRETTA::FormatID configuredFormat = m_syncBuffer->getSinkConfigure();
     
     if (configuredFormat == formatID) {
-        std::cout << "[DirettaOutput]    ✅ Target accepted requested format" << std::endl;
+        DEBUG_LOG("[DirettaOutput]    ✅ Target accepted requested format" << std::endl;
     } else {
         std::cout << "[DirettaOutput]    ⚠️  Target modified format!" << std::endl;
         std::cout << "[DirettaOutput]       Requested: 0x" << std::hex << static_cast<uint32_t>(formatID) << std::dec << std::endl;
@@ -1004,11 +1004,11 @@ if (format.dsdFormat == AudioFormat::DSDFormat::DFF) {
         formatID = configuredFormat;
     }
     
-    std::cout << "[DirettaOutput] 3. Setting format..." << std::endl;
+    DEBUG_LOG("[DirettaOutput] 3. Setting format..." << std::endl;
     // Format already configured during negotiation above
     
 // 4. Configuring transfer...
-std::cout << "[DirettaOutput] 4. Configuring transfer..." << std::endl;
+DEBUG_LOG("[DirettaOutput] 4. Configuring transfer..." << std::endl;
 
 // ⭐ Détecter les formats bas débit qui nécessitent des paquets plus petits
 bool isLowBitrate = (format.bitDepth <= 16 && format.sampleRate <= 48000 && !format.isDSD);
@@ -1027,19 +1027,19 @@ if (isLowBitrate) {
     std::cout << "[DirettaOutput] ✓ configTransferAuto (packets ~1-3k)" << std::endl;
 } else {
     // Pour Hi-Res (24bit, 88.2k+, DSD, etc.) : jumbo frames pour performance max
-    std::cout << "[DirettaOutput] ✓ Hi-Res format (" 
+    DEBUG_LOG("[DirettaOutput] ✓ Hi-Res format (" 
               << format.bitDepth << "bit/" << format.sampleRate << "Hz)" << std::endl;
-    std::cout << "[DirettaOutput] Using configTransferVarMax (jumbo frames)" << std::endl;
+    DEBUG_LOG("[DirettaOutput] Using configTransferVarMax (jumbo frames)" << std::endl;
     
     m_syncBuffer->configTransferVarMax(
         ACQUA::Clock::MicroSeconds(200)   // limitCycle
     );
-    std::cout << "[DirettaOutput] ✓ configTransferVarMax (Packet Full mode, ~16k)" << std::endl;
+    DEBUG_LOG("[DirettaOutput] ✓ configTransferVarMax (Packet Full mode, ~16k)" << std::endl;
 }
-std::cout << "[DirettaOutput] DEBUG: MTU passed to setSink: " << m_mtu << std::endl;
-std::cout << "[DirettaOutput] DEBUG: Check packet size in tcpdump..." << std::endl;
+DEBUG_LOG("[DirettaOutput] DEBUG: MTU passed to setSink: " << m_mtu << std::endl;
+DEBUG_LOG("[DirettaOutput] DEBUG: Check packet size in tcpdump..." << std::endl;
 
-std::cout << "[DirettaOutput] configTransferAuto: limit=200us, min=333us, max=10000us" << std::endl;
+DEBUG_LOG("[DirettaOutput] configTransferAuto: limit=200us, min=333us, max=10000us" << std::endl;
 // Calculer manuellement au lieu de se fier à getSinkConfigure()
 int bytesPerSample;
 int frameSize;
@@ -1048,7 +1048,7 @@ if (format.isDSD) {
     // ✅ DSD with FMT_DSD_SIZ_32: 32-bit containers = 4 bytes per sample
     bytesPerSample = 4;  // 32-bit word
     frameSize = bytesPerSample * format.channels;  // 4 × 2 = 8 bytes for stereo
-    std::cout << "[DirettaOutput]      - DSD: Using 32-bit containers" << std::endl;
+    DEBUG_LOG("[DirettaOutput]      - DSD: Using 32-bit containers" << std::endl;
 } else {
     // PCM: standard calculation
     bytesPerSample = (format.bitDepth / 8);
@@ -1056,17 +1056,17 @@ if (format.isDSD) {
 }
 const int fs1sec = format.sampleRate;
 
-std::cout << "[DirettaOutput]    Manual calculation:" << std::endl;
-std::cout << "[DirettaOutput]      - Bytes per sample: " << bytesPerSample << std::endl;
-std::cout << "[DirettaOutput]      - Frame size: " << frameSize << " bytes" << std::endl;
-std::cout << "[DirettaOutput]      - Frames per second: " << fs1sec << std::endl;
-std::cout << "[DirettaOutput]      - Buffer: " << fs1sec << " × " << m_bufferSeconds 
+DEBUG_LOG("[DirettaOutput]    Manual calculation:" << std::endl;
+DEBUG_LOG("[DirettaOutput]      - Bytes per sample: " << bytesPerSample << std::endl;
+DEBUG_LOG("[DirettaOutput]      - Frame size: " << frameSize << " bytes" << std::endl;
+DEBUG_LOG("[DirettaOutput]      - Frames per second: " << fs1sec << std::endl;
+DEBUG_LOG("[DirettaOutput]      - Buffer: " << fs1sec << " × " << m_bufferSeconds 
           << " = " << (fs1sec * m_bufferSeconds) << " frames" << std::endl;
-std::cout << "[DirettaOutput]      ⚠️  CRITICAL: This is " << m_bufferSeconds 
+DEBUG_LOG("[DirettaOutput]      ⚠️  CRITICAL: This is " << m_bufferSeconds 
           << " seconds of audio buffer in Diretta!" << std::endl;
 
 m_syncBuffer->setupBuffer(fs1sec * m_bufferSeconds, 4, false);
-    std::cout << "[DirettaOutput] 6. Connecting..." << std::endl;
+    DEBUG_LOG("[DirettaOutput] 6. Connecting..." << std::endl;
     m_syncBuffer->connect(0, 0);
     // m_syncBuffer->connectWait();
 
@@ -1086,7 +1086,7 @@ m_syncBuffer->setupBuffer(fs1sec * m_bufferSeconds, 4, false);
         return false;
     }
     
-    std::cout << "[DirettaOutput] ✓ Connected: " << format.sampleRate 
+    DEBUG_LOG("[DirettaOutput] ✓ Connected: " << format.sampleRate 
               << "Hz/" << format.bitDepth << "bit/" << format.channels << "ch" << std::endl;
     
     return true;

@@ -22,6 +22,8 @@ void signalHandler(int signal) {
     }
     exit(0);
 }
+ // Variable globale pour le mode verbose
+   bool g_verbose = false;
 
 // List available Diretta targets
 void listTargets() {
@@ -81,6 +83,11 @@ DirettaRenderer::Config parseArguments(int argc, char* argv[]) {
             listTargets();
             exit(0);
         }
+                else if (arg == "--verbose" || arg == "-v") {
+            // ⭐ NOUVEAU: Option verbose
+            g_verbose = true;
+            std::cout << "✓ Verbose mode enabled" << std::endl;
+        }
         else if (arg == "--help" || arg == "-h") {
             std::cout << "Diretta UPnP Renderer\n\n"
                       << "Usage: " << argv[0] << " [options]\n\n"
@@ -92,11 +99,16 @@ DirettaRenderer::Config parseArguments(int argc, char* argv[]) {
                       << "  --buffer, -b <secs>   Buffer size in seconds (default: 10)\n"
                       << "  --target, -t <index>  Select Diretta target by index (1, 2, 3...)\n"
                       << "  --list-targets, -l    List available Diretta targets and exit\n"
+                      << "  --verbose, -v         Enable verbose debug output\n"
                       << "  --help, -h            Show this help\n"
                       << "\nTarget Selection:\n"
                       << "  First, scan for targets:  " << argv[0] << " --list-targets\n"
                       << "  Then, use specific target: " << argv[0] << " --target 1\n"
                       << "  Or use interactive mode:   " << argv[0] << " (prompts if multiple targets)\n"
+                      << "  Or use interactive mode:   " << argv[0] << " (prompts if multiple targets)\n"
+                      << "\nDebug Mode:\n"  // ⭐ NOUVEAU
+                      << "  Normal mode (clean output): " << argv[0] << " --target 1\n"
+                      << "  Verbose mode (all logs):    " << argv[0] << " --target 1 --verbose\n"                     
                       << std::endl;
             exit(0);
         }
