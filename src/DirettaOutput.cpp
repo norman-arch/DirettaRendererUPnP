@@ -1092,13 +1092,12 @@ std::cout << "[DirettaOutput] DEBUG: MTU passed to setSink: " << m_mtu << std::e
 std::cout << "[DirettaOutput] DEBUG: Check packet size in tcpdump..." << std::endl;
 
 std::cout << "[DirettaOutput] configTransferAuto: limit=200us, min=333us, max=10000us" << std::endl;
-
-// ✅ CORRECTION: Calculer frame size correctement pour DSD
+// Calculer manuellement au lieu de se fier à getSinkConfigure()
 int bytesPerSample;
 int frameSize;
 
 if (format.isDSD) {
-    // DSD with FMT_DSD_SIZ_32: 32-bit containers = 4 bytes per sample
+    // ✅ DSD with FMT_DSD_SIZ_32: 32-bit containers = 4 bytes per sample
     bytesPerSample = 4;  // 32-bit word
     frameSize = bytesPerSample * format.channels;  // 4 × 2 = 8 bytes for stereo
     std::cout << "[DirettaOutput]      - DSD: Using 32-bit containers" << std::endl;
@@ -1107,8 +1106,7 @@ if (format.isDSD) {
     bytesPerSample = (format.bitDepth / 8);
     frameSize = bytesPerSample * format.channels;
 }
-
-const int fs1sec = format.sampleRate;  // ← GARDER CETTE LIGNE !
+const int fs1sec = format.sampleRate;
 
 std::cout << "[DirettaOutput]    Manual calculation:" << std::endl;
 std::cout << "[DirettaOutput]      - Bytes per sample: " << bytesPerSample << std::endl;
@@ -1119,7 +1117,7 @@ std::cout << "[DirettaOutput]      - Buffer: " << fs1sec << " × " << m_bufferSe
 std::cout << "[DirettaOutput]      ⚠️  CRITICAL: This is " << m_bufferSeconds 
           << " seconds of audio buffer in Diretta!" << std::endl;
 
-m_syncBuffer->setupBuffer(fs1sec * m_bufferSeconds, 4, false);   
+m_syncBuffer->setupBuffer(fs1sec * m_bufferSeconds, 4, false);
     std::cout << "[DirettaOutput] 6. Connecting..." << std::endl;
     m_syncBuffer->connect(0, 0);
     // m_syncBuffer->connectWait();
