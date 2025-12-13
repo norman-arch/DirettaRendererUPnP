@@ -5,7 +5,7 @@
  * CORRECTION MAJEURE:
  * - Ajout de contrôle de débit précis dans audioThreadFunc()
  * - Le timing est basé sur le sample rate du fichier en cours
- * - Utilise sleep_until() pour un timing précis aà la microseconde près
+ * - Utilise sleep_until() pour un timing précis au microseconde près
  */
 
 #include "DirettaRenderer.h"
@@ -26,7 +26,8 @@
 // Logging system - Variable globale définie dans main.cpp
 // ============================================================================
 extern bool g_verbose;
-#define DEBUG_LOG(x) if (g_verbose) { std::cout << x << std::endl; }
+#define DEBUG_LOG(x) if (g_verbose) { std::cout << x); }
+
 
 // Generate stable UUID based on hostname
 // This ensures the same UUID across restarts, so UPnP control points
@@ -201,13 +202,15 @@ bool DirettaRenderer::start() {
                 }
             }
             
-            DEBUG_LOG("[DirettaRenderer] 🔌 Opening Diretta connection: ";
-            if (format.isDSD) {
-                std::cout << "DSD" << trackInfo.dsdRate << " (" << sampleRate << " Hz)";
-            } else {
-                std::cout << sampleRate << "Hz/" << bitDepth << "bit";
+            if (g_verbose) {
+                std::cout << "[DirettaRenderer] 🔌 Opening Diretta connection: ";
+                if (format.isDSD) {
+                    std::cout << "DSD" << trackInfo.dsdRate << " (" << sampleRate << " Hz)";
+                } else {
+                    std::cout << sampleRate << "Hz/" << bitDepth << "bit";
+                }
+                std::cout << "/" << channels << "ch" << std::endl;
             }
-            std::cout << "/" << channels << "ch" << std::endl;
             
             if (!m_direttaOutput->open(format, m_config.bufferSeconds)) {
                 std::cerr << "[DirettaRenderer] ❌ Failed to open Diretta output" << std::endl;
@@ -278,16 +281,18 @@ bool DirettaRenderer::start() {
 );        
         m_audioEngine->setTrackChangeCallback(
             [this](int trackNumber, const TrackInfo& info, const std::string& uri, const std::string& metadata) {
-                DEBUG_LOG("[DirettaRenderer] 🎵 Track " << trackNumber 
-                          << ": " << info.codec << " ";
-                
-                if (info.isDSD) {
-                    std::cout << "DSD" << info.dsdRate << " (" << info.sampleRate << "Hz)";
-                } else {
-                    std::cout << info.sampleRate << "Hz/" << info.bitDepth << "bit";
+                if (g_verbose) {
+                    std::cout << "[DirettaRenderer] 🎵 Track " << trackNumber 
+                              << ": " << info.codec << " ";
+                    
+                    if (info.isDSD) {
+                        std::cout << "DSD" << info.dsdRate << " (" << info.sampleRate << "Hz)";
+                    } else {
+                        std::cout << info.sampleRate << "Hz/" << info.bitDepth << "bit";
+                    }
+                    
+                    std::cout << "/" << info.channels << "ch" << std::endl;
                 }
-                
-                std::cout << "/" << info.channels << "ch" << std::endl;
                 
                 // CRITICAL: Update UPnP with new URI and metadata
                 DEBUG_LOG("[DirettaRenderer] 🔔 Notifying UPnP of track change");
@@ -363,7 +368,7 @@ if (m_direttaOutput && m_direttaOutput->isPaused()) {
         
         if (timeSinceStop.count() < 100) {
             DEBUG_LOG("[DirettaRenderer] ⚠️  Stop was " << timeSinceStop.count() 
-                      << "ms ago, adding safety delay" << std::endl;
+                      << "ms ago, adding safety delay");
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
     }
