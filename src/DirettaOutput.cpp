@@ -454,8 +454,8 @@ if (!m_currentFormat.isDSD && m_currentFormat.bitDepth == 24) {
     
     static int convCount = 0;
     if (convCount++ < 3 || convCount % 100 == 0) {
-        std::cout << "[sendAudio] S32→S24: " << numSamples << " samples, " 
-                  << totalSamples << " total, " << dataSize << " bytes" << std::endl;
+        DEBUG_LOG("[sendAudio] S32→S24: " << numSamples << " samples, " 
+                  << totalSamples << " total, " << dataSize << " bytes");
     }
     } else {
         // For other formats (16-bit, 32-bit, DSD): direct copy
