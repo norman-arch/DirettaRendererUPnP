@@ -1064,7 +1064,7 @@ void AudioEngine::setTrackChangeCallback(const TrackChangeCallback& callback) {
     m_trackChangeCallback = callback;
 }
 
-void AudioEngine::setCurrentURI(const std::string& uri, const std::string& metadata, bool forceReopen) {  // ⭐ Ajouter paramètre
+void AudioEngine::setCurrentURI(const std::string& uri, const std::string& metadata, bool forceReopen) {
     std::lock_guard<std::mutex> lock(m_mutex);
     
     // CRITICAL: Si on change d'URI pendant la lecture, fermer les décodeurs
@@ -1084,10 +1084,29 @@ void AudioEngine::setCurrentURI(const std::string& uri, const std::string& metad
         m_currentDecoder.reset();
         m_nextDecoder.reset();
         
+        // ⭐⭐⭐ CRITICAL FIX: Clear gapless queue when changing URI
+        // Otherwise, the old "next track" will play after the new track finishes!
+        {
+            std::lock_guard<std::mutex> pendingLock(m_pendingMutex);
+            m_pendingNextURI.clear();
+            m_pendingNextMetadata.clear();
+            m_pendingNextTrack.store(false, std::memory_order_release);
+        }
+        m_nextURI.clear();
+        m_nextMetadata.clear();
+        
+        std::cout << "[AudioEngine] ✓ Gapless queue cleared" << std::endl;
+        
         // Réinitialiser la position
         m_samplesPlayed = 0;
         m_silenceCount = 0;
         m_isDraining = false;
+        
+        // Arrêter le préchargement en cours si existant
+        if (m_preloadRunning.load(std::memory_order_acquire)) {
+            m_preloadRunning.store(false, std::memory_order_release);
+            std::cout << "[AudioEngine] ⚠️  Cancelling ongoing preload" << std::endl;
+        }
         
         // Si on est en PLAYING, on va automatiquement ouvrir la nouvelle piste
         // au prochain process()
@@ -1095,7 +1114,6 @@ void AudioEngine::setCurrentURI(const std::string& uri, const std::string& metad
     
     std::cout << "[AudioEngine] Current URI set" << std::endl;
 }
-
 void AudioEngine::setNextURI(const std::string& uri, const std::string& metadata) {
     // Thread-safe: Use pending mechanism to defer to audio thread
     {
