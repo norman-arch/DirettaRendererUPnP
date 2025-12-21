@@ -1231,31 +1231,55 @@ bool AudioEngine::process(size_t samplesNeeded) {
     // Vérification rapide sans mutex
     State currentState = m_state.load();
     
-    if (currentState != State::PLAYING) {
-        // ⚠️ DISTINCTION CRITIQUE : PAUSED vs STOPPED
-        if (currentState == State::STOPPED) {
-            // Cleanup UNIQUEMENT si STOPPED (pas PAUSED)
-            std::lock_guard<std::mutex> lock(m_mutex);
-            
-            if (m_currentDecoder || m_nextDecoder) {
-                std::cout << "[AudioEngine] 🧹 Cleanup after STOP" << std::endl;
-                m_currentDecoder.reset();
-                m_nextDecoder.reset();
-                m_samplesPlayed = 0;
-                // ✅ NE PAS effacer m_currentURI - on veut redémarrer depuis le début
-                // Le decoder sera rouvert à position 0 au prochain play()
+    // ⭐⭐⭐ CRITICAL: Process async seek request (lock-free check)
+    // This runs in the audio thread, so we can safely take the mutex
+    if (m_seekRequested.load(std::memory_order_acquire)) {
+        double targetSeconds = m_seekTarget.load(std::memory_order_acquire);
+        m_seekRequested.store(false, std::memory_order_release);
+        
+        std::cout << "[AudioEngine] 🔍 Processing async seek to " << targetSeconds << "s" << std::endl;
+        
+        // Now we can safely take the mutex (we're in the audio thread)
+        std::lock_guard<std::mutex> seekLock(m_mutex);
+        
+        // Validate decoder exists
+        if (!m_currentDecoder) {
+            std::cerr << "[AudioEngine] ❌ No decoder for seek" << std::endl;
+            // Don't return false - continue playing
+        } else {
+            // Validate position
+            const TrackInfo& info = m_currentTrackInfo;
+            if (info.sampleRate > 0 && info.duration > 0) {
+                double maxSeconds = static_cast<double>(info.duration) / info.sampleRate;
+                if (targetSeconds > maxSeconds) {
+                    targetSeconds = maxSeconds;
+                }
+                if (targetSeconds < 0) {
+                    targetSeconds = 0;
+                }
+                
+                // Perform the actual seek
+                if (m_currentDecoder->seek(targetSeconds)) {
+                    // Update position
+                    m_samplesPlayed = static_cast<uint64_t>(targetSeconds * info.sampleRate);
+                    
+                    // Reset drainage counters
+                    m_silenceCount = 0;
+                    m_isDraining = false;
+                    
+                    std::cout << "[AudioEngine] ✓ Seek completed to " << targetSeconds << "s" << std::endl;
+                    DEBUG_LOG("[AudioEngine] ✓ Position updated to " 
+                              << m_samplesPlayed << " samples (" << targetSeconds << "s)");
+                } else {
+                    std::cerr << "[AudioEngine] ❌ Seek failed in decoder" << std::endl;
+                }
             }
-        } else if (currentState == State::PAUSED) {
-            // En PAUSED, on ne fait RIEN - on garde tout en mémoire
-            // Le décodeur reste ouvert à sa position actuelle
-            // Prêt à reprendre instantanément
         }
         
-        return false;
+        // Continue processing after seek
     }
     
-    std::lock_guard<std::mutex> lock(m_mutex);
-    
+    std::lock_guard<std::mutex> lock(m_mutex);    
     // Double vérification avec mutex
     if (m_state.load() != State::PLAYING) {
         return false;
@@ -1592,47 +1616,38 @@ bool AudioDecoder::seek(double seconds) {
 // ============================================================================
 
 bool AudioEngine::seek(double seconds) {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    // ⭐⭐⭐ CRITICAL FIX: Async seek to avoid deadlock
+    // The UPnP thread calling this should not block waiting for mutex
+    // Instead, we set atomic flags and let the audio thread handle the seek
     
-    std::cout << "[AudioEngine] ⏩ Seek to " << seconds << " seconds" << std::endl;
+    std::cout << "[AudioEngine] ⏩ Seek requested to " << seconds << " seconds (async)" << std::endl;
     
-    // Vérifier qu'on a un décodeur actif
-    if (!m_currentDecoder) {
-        std::cerr << "[AudioEngine] Cannot seek: no active decoder" << std::endl;
+    // Quick validation without mutex
+    if (m_state.load(std::memory_order_acquire) != State::PLAYING) {
+        std::cerr << "[AudioEngine] ❌ Cannot seek when not playing" << std::endl;
         return false;
     }
     
-    // Vérifier que la position est valide
+    // Clamp to valid range (optimistic check, will be validated in audio thread)
     const TrackInfo& info = m_currentTrackInfo;
-    if (info.sampleRate == 0 || info.duration == 0) {
-        std::cerr << "[AudioEngine] Cannot seek: invalid track info" << std::endl;
-        return false;
+    if (info.sampleRate > 0 && info.duration > 0) {
+        double maxSeconds = static_cast<double>(info.duration) / info.sampleRate;
+        if (seconds < 0) {
+            seconds = 0;
+        }
+        if (seconds > maxSeconds) {
+            DEBUG_LOG("[AudioEngine] Seek position clamped to " << maxSeconds << "s");
+            seconds = maxSeconds;
+        }
     }
     
-    double maxSeconds = static_cast<double>(info.duration) / info.sampleRate;
-    if (seconds < 0) {
-        seconds = 0;
-    }
-    if (seconds > maxSeconds) {
-        DEBUG_LOG("[AudioEngine] Seek position clamped to " << maxSeconds << "s");
-        seconds = maxSeconds;
-    }
+    // ⭐ Set seek request atomically (lock-free, non-blocking)
+    m_seekTarget.store(seconds, std::memory_order_release);
+    m_seekRequested.store(true, std::memory_order_release);
     
-    // Effectuer le seek dans le décodeur
-    if (!m_currentDecoder->seek(seconds)) {
-        return false;
-    }
+    std::cout << "[AudioEngine] ✓ Seek queued, will be processed by audio thread" << std::endl;
     
-    // Mettre à jour le compteur de samples
-    m_samplesPlayed = static_cast<uint64_t>(seconds * info.sampleRate);
-    
-    // Réinitialiser les compteurs de drainage
-    m_silenceCount = 0;
-    m_isDraining = false;
-    
-    DEBUG_LOG("[AudioEngine] ✓ Position updated to " 
-              << m_samplesPlayed << " samples (" << seconds << "s)")
-    
+    // Return immediately - UPnP thread doesn't wait
     return true;
 }
 

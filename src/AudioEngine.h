@@ -332,14 +332,18 @@ private:
     std::string m_pendingNextURI;
     std::string m_pendingNextMetadata;
 
-    // Preload thread management (replaces detached thread)
+   // Preload thread management (replaces detached thread)
     std::thread m_preloadThread;
     std::atomic<bool> m_preloadRunning{false};
     void waitForPreloadThread();
 
+    // ⭐⭐⭐ NEW: Async seek mechanism to avoid deadlock
+    // The UPnP thread sets these flags, the audio thread processes the seek
+    std::atomic<bool> m_seekRequested{false};
+    std::atomic<double> m_seekTarget{0.0};
+
     // Prevent copying
     AudioEngine(const AudioEngine&) = delete;
-    AudioEngine& operator=(const AudioEngine&) = delete;
-};
+    AudioEngine& operator=(const AudioEngine&) = delete;};
 
 #endif // AUDIO_ENGINE_H
