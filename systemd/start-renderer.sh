@@ -1,28 +1,89 @@
 #!/bin/bash
 # Diretta UPnP Renderer - Startup Wrapper Script
-# This script builds the command line with all configured parameters
+# This script reads configuration and starts the renderer with appropriate options
 
-# Source configuration
-if [ -f /opt/diretta-renderer-upnp/diretta-renderer.conf ]; then
-    . /opt/diretta-renderer-upnp/diretta-renderer.conf
+set -e
+
+# Default values (can be overridden by config file)
+TARGET="${TARGET:-1}"
+PORT="${PORT:-4005}"
+BUFFER="${BUFFER:-2.0}"
+GAPLESS="${GAPLESS:-}"
+VERBOSE="${VERBOSE:-}"
+NETWORK_INTERFACE="${NETWORK_INTERFACE:-}"
+THREAD_MODE="${THREAD_MODE:-}"
+CYCLE_TIME="${CYCLE_TIME:-}"
+CYCLE_MIN_TIME="${CYCLE_MIN_TIME:-}"
+INFO_CYCLE="${INFO_CYCLE:-}"
+MTU_OVERRIDE="${MTU_OVERRIDE:-}"
+
+RENDERER_BIN="/opt/diretta-renderer-upnp/DirettaRendererUPnP"
+
+# Build command with options
+CMD="$RENDERER_BIN"
+
+# Basic options
+CMD="$CMD --target-index $TARGET"
+CMD="$CMD --buffer $BUFFER"
+
+# Network interface option (CRITICAL for multi-homed systems)
+if [ -n "$NETWORK_INTERFACE" ]; then
+    # Check if it looks like an IP address or interface name
+    if [[ "$NETWORK_INTERFACE" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "Binding to IP address: $NETWORK_INTERFACE"
+        CMD="$CMD --bind-ip $NETWORK_INTERFACE"
+    else
+        echo "Binding to network interface: $NETWORK_INTERFACE"
+        CMD="$CMD --interface $NETWORK_INTERFACE"
+    fi
 fi
 
-# Build command with defaults
-CMD="/opt/diretta-renderer-upnp/DirettaRendererUPnP"
-CMD="$CMD --target ${TARGET:-1}"
-CMD="$CMD --port ${PORT:-4005}"
-CMD="$CMD --buffer ${BUFFER:-2.0}"
+# Gapless
+if [ -n "$GAPLESS" ]; then
+    CMD="$CMD $GAPLESS"
+fi
 
-# Advanced Diretta SDK settings with defaults
-CMD="$CMD --thread-mode ${THREAD_MODE:-1}"
-CMD="$CMD --cycle-time ${CYCLE_TIME:-10000}"
-CMD="$CMD --cycle-min-time ${CYCLE_MIN_TIME:-333}"
-CMD="$CMD --info-cycle ${INFO_CYCLE:-5000}"
+# Verbose
+if [ -n "$VERBOSE" ]; then
+    CMD="$CMD $VERBOSE"
+fi
 
-# Optional parameters (only if set)
-[ -n "$MTU_OVERRIDE" ] && CMD="$CMD --mtu $MTU_OVERRIDE"
-[ -n "$GAPLESS" ] && CMD="$CMD $GAPLESS"
-[ -n "$VERBOSE" ] && CMD="$CMD $VERBOSE"
+# Advanced Diretta settings (only if specified)
+if [ -n "$THREAD_MODE" ]; then
+    CMD="$CMD --thread-mode $THREAD_MODE"
+fi
+
+if [ -n "$CYCLE_TIME" ]; then
+    CMD="$CMD --cycle-time $CYCLE_TIME"
+fi
+
+if [ -n "$CYCLE_MIN_TIME" ]; then
+    CMD="$CMD --cycle-min-time $CYCLE_MIN_TIME"
+fi
+
+if [ -n "$INFO_CYCLE" ]; then
+    CMD="$CMD --info-cycle $INFO_CYCLE"
+fi
+
+if [ -n "$MTU_OVERRIDE" ]; then
+    CMD="$CMD --mtu $MTU_OVERRIDE"
+fi
+
+# Log the command being executed
+echo "════════════════════════════════════════════════════════"
+echo "  Starting Diretta UPnP Renderer"
+echo "════════════════════════════════════════════════════════"
+echo ""
+echo "Configuration:"
+echo "  Target:           $TARGET"
+echo "  Buffer:           $BUFFER seconds"
+echo "  Network Interface: ${NETWORK_INTERFACE:-auto-detect}"
+echo ""
+echo "Command:"
+echo "  $CMD"
+echo ""
+echo "════════════════════════════════════════════════════════"
+echo ""
 
 # Execute
 exec $CMD
