@@ -462,7 +462,7 @@ Tested and working with:
 - **Gapless**: On (if desired)
 
 ## AUDIRVANA
-- **Universal gapless enabled**: is you notice pink noise after few seconds of playback
+- **Universal gapless enabled**: if you notice pink noise after few seconds of playback
 - **DSD**: DSD isn’t functioning properly, as the DAC plays PCM instead (e.g., DSD64 → PCM 352.4 kHz). So you can set NO DSD.
 
 ---
@@ -548,7 +548,176 @@ This means the Diretta Target is refusing the connection:
 For more solutions, see the [Troubleshooting Guide](docs/TROUBLESHOOTING.md).
 
 ---
+# Advanced Configuration
 
+## Command-Line Parameters
+
+### Basic Options
+
+```bash
+--name, -n <name>       Renderer name (default: Diretta Renderer)
+--port, -p <port>       UPnP port (default: auto)
+--buffer, -b <seconds>  Buffer size in seconds (default: 2.0)
+--target, -t <index>    Select Diretta target by index (1, 2, 3...)
+--no-gapless            Disable gapless playback
+--verbose               Enable verbose debug output
+```
+
+### Advanced Diretta SDK Options
+
+Fine-tune the Diretta protocol behavior for optimal performance:
+
+#### Thread Mode (`--thread-mode <value>`)
+
+Controls real-time thread behavior using a bitmask. Add values together for multiple flags.
+
+**Available flags:**
+| Value | Flag | Description |
+|-------|------|-------------|
+| 1 | Critical | REALTIME priority (default) |
+| 2 | NoShortSleep | Disable short sleep intervals |
+| 4 | NoSleep4Core | Disable sleep for 4-core systems |
+| 8 | SocketNoBlock | Non-blocking socket operations |
+| 16 | OccupiedCPU | Maximize CPU utilization |
+| 32/64/128 | FEEDBACK | Moving average feedback control |
+| 256 | NOFASTFEEDBACK | Disable fast feedback |
+| 512 | IDLEONE | Idle one thread |
+| 1024 | IDLEALL | Idle all threads |
+| 2048 | NOSLEEPFORCE | Force no sleep |
+| 4096 | LIMITRESEND | Limit resend operations |
+| 8192 | NOJUMBOFRAME | Disable jumbo frames |
+| 16384 | NOFIREWALL | Bypass firewall optimizations |
+| 32768 | NORAWSOCKET | Disable raw sockets |
+
+**Examples:**
+```bash
+# Default (Critical only)
+--thread-mode 1
+
+# Critical + OccupiedCPU (high performance)
+--thread-mode 17
+
+# Critical + FEEDBACK32
+--thread-mode 33
+```
+
+#### Transfer Timing
+
+Fine-tune packet transfer timing:
+
+```bash
+--cycle-time <µs>       Transfer packet cycle max time (default: 10000)
+                        Range: 333-10000 microseconds
+
+--cycle-min-time <µs>   Transfer packet cycle min time (default: 333)
+                        Only used in random mode
+
+--info-cycle <µs>       Information packet cycle time (default: 5000)
+```
+
+**Example:**
+```bash
+# Faster packet cycling for low-latency
+--cycle-time 5000 --info-cycle 2500
+```
+
+#### MTU Override
+
+```bash
+--mtu <bytes>           Force specific MTU (default: auto-detect)
+                        Common values: 1500 (standard), 9000 (jumbo), 16128 (max)
+```
+
+## Configuration File
+
+Edit `/opt/diretta-renderer-upnp/diretta-renderer.conf` for persistent settings:
+
+```bash
+# Basic settings
+TARGET=1
+PORT=4005
+BUFFER=2.0
+GAPLESS=""
+VERBOSE=""
+
+# Advanced Diretta SDK settings (uncomment to override defaults)
+#THREAD_MODE=17
+#CYCLE_TIME=10000
+#CYCLE_MIN_TIME=333
+#INFO_CYCLE=5000
+#MTU_OVERRIDE=16128
+```
+
+After editing, reload the service:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart diretta-renderer
+```
+
+## Performance Tuning Examples
+
+### High-Resolution Audio (DSD512, PCM768)
+```bash
+--buffer 3.0 --thread-mode 17 --cycle-time 8000
+```
+
+### Low-Latency Setup
+```bash
+--buffer 1.5 --thread-mode 33 --cycle-time 5000 --info-cycle 2500
+```
+
+### Maximum Stability (slower systems)
+```bash
+--buffer 4.0 --thread-mode 1 --cycle-time 10000
+```
+
+### Jumbo Frames Optimization
+```bash
+--mtu 16128 --thread-mode 17 --buffer 2.0
+```
+
+## Troubleshooting
+
+### Pink noise with Audirvana Studio + Qobuz streaming (24-bit)
+
+**Symptom:** Pink noise appears after 6-7 seconds when streaming from Qobuz in 24-bit mode.
+
+**Workaround:**
+1. In Audirvana Studio, limit output to 16-bit or 20-bit
+2. Local 24-bit files work perfectly
+3. Other players (JPLAY iOS, mConnect, Roon) work correctly with 24-bit
+
+**Note:** This is a known compatibility issue between Audirvana's HTTP streaming pattern and the Diretta SDK. A fix is being investigated with the SDK developer.
+
+### Dropouts or buffer underruns
+
+Try increasing buffer size:
+```bash
+--buffer 3.0
+```
+
+Or adjust thread mode for better CPU utilization:
+```bash
+--thread-mode 17
+```
+
+### Network performance issues
+
+Ensure jumbo frames are enabled on your network, then:
+```bash
+--mtu 9000
+```
+
+Check current MTU with:
+```bash
+ip link show | grep mtu
+```
+
+## Credits
+
+Advanced configuration options are based on the Diretta SDK by Yu Harada.
+
+---
 ## FAQ
 
 ### Q: Do I need a DAC with Diretta support?
