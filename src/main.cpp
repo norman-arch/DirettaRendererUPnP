@@ -55,6 +55,13 @@ DirettaRenderer::Config parseArguments(int argc, char* argv[]) {
     config.gaplessEnabled = true;
     config.bufferSeconds = 2.0f;  // Default 2 seconds (v1.0.9)
     
+    // ⭐ NEW: Advanced Diretta SDK settings
+    config.threadMode = 1;        // Default: Critical only
+    config.cycleTime = 10000;     // Default: 10ms
+    config.cycleMinTime = 333;    // Default: 333µs
+    config.infoCycle = 5000;      // Default: 5ms
+    config.mtuOverride = 0;       // 0 = auto-detect
+    
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
         
@@ -81,6 +88,27 @@ DirettaRenderer::Config parseArguments(int argc, char* argv[]) {
             if (config.targetIndex < 0) {
                 std::cerr << "❌ Invalid target index. Must be >= 1" << std::endl;
                 exit(1);
+            }
+        }
+        else if ((arg == "--thread-mode") && i + 1 < argc) {
+            config.threadMode = std::atoi(argv[++i]);
+        }
+        else if ((arg == "--cycle-time") && i + 1 < argc) {
+            config.cycleTime = std::atoi(argv[++i]);
+            if (config.cycleTime < 333 || config.cycleTime > 10000) {
+                std::cerr << "⚠️  Warning: cycle-time should be between 333-10000 µs" << std::endl;
+            }
+        }
+        else if ((arg == "--cycle-min-time") && i + 1 < argc) {
+            config.cycleMinTime = std::atoi(argv[++i]);
+        }
+        else if ((arg == "--info-cycle") && i + 1 < argc) {
+            config.infoCycle = std::atoi(argv[++i]);
+        }
+        else if ((arg == "--mtu") && i + 1 < argc) {
+            config.mtuOverride = std::atoi(argv[++i]);
+            if (config.mtuOverride > 0 && config.mtuOverride < 1500) {
+                std::cerr << "⚠️  Warning: MTU < 1500 may cause issues" << std::endl;
             }
         }
         else if (arg == "--list-targets" || arg == "-l") {
@@ -116,6 +144,19 @@ DirettaRenderer::Config parseArguments(int argc, char* argv[]) {
                       << "  --verbose, -v         Enable verbose debug output\n"
                       << "  --version, -V         Show version information\n"
                       << "  --help, -h            Show this help\n"
+                       << "\n"
+                      << "Advanced Diretta SDK Options:\n"
+                      << "  --thread-mode <value>   Thread mode bitmask (default: 1)\n"
+                      << "                          1=Critical, 2=NoShortSleep, 4=NoSleep4Core,\n"
+                      << "                          8=SocketNoBlock, 16=OccupiedCPU, 32/64/128=FEEDBACK,\n"
+                      << "                          256=NOFASTFEEDBACK, 512=IDLEONE, 1024=IDLEALL,\n"
+                      << "                          2048=NOSLEEPFORCE, 4096=LIMITRESEND,\n"
+                      << "                          8192=NOJUMBOFRAME, 16384=NOFIREWALL, 32768=NORAWSOCKET\n"
+                      << "  --cycle-time <µs>       Transfer packet cycle max time (default: 10000)\n"
+                      << "  --cycle-min-time <µs>   Transfer packet cycle min time (default: 333)\n"
+                      << "  --info-cycle <µs>       Information packet cycle time (default: 5000)\n"
+                      << "  --mtu <bytes>           Override MTU (default: auto-detect)\n"
+                      << "\n"                     
                       << "\nTarget Selection:\n"
                       << "  First, scan for targets:  " << argv[0] << " --list-targets\n"
                       << "  Then, use specific target: " << argv[0] << " --target 1\n"
@@ -157,6 +198,22 @@ int main(int argc, char* argv[]) {
     std::cout << "  Gapless:     " << (config.gaplessEnabled ? "enabled" : "disabled") << std::endl;
     std::cout << "  Buffer:      " << config.bufferSeconds << " seconds" << std::endl;
     std::cout << "  UUID:        " << config.uuid << std::endl;
+     // ⭐ NEW: Display advanced settings only if modified from defaults
+    if (config.threadMode != 1 || config.cycleTime != 10000 || 
+        config.cycleMinTime != 333 || config.infoCycle != 5000 || 
+        config.mtuOverride != 0) {
+        std::cout << "\nAdvanced Diretta Settings:" << std::endl;
+        if (config.threadMode != 1)
+            std::cout << "  Thread Mode: " << config.threadMode << std::endl;
+        if (config.cycleTime != 10000)
+            std::cout << "  Cycle Time:  " << config.cycleTime << " µs" << std::endl;
+        if (config.cycleMinTime != 333)
+            std::cout << "  Cycle Min:   " << config.cycleMinTime << " µs" << std::endl;
+        if (config.infoCycle != 5000)
+            std::cout << "  Info Cycle:  " << config.infoCycle << " µs" << std::endl;
+        if (config.mtuOverride != 0)
+            std::cout << "  MTU:         " << config.mtuOverride << " bytes" << std::endl;
+    }
     std::cout << std::endl;
     
     try {

@@ -1015,7 +1015,7 @@ if (format.dsdFormat == AudioFormat::DSDFormat::DFF) {
      // ===== SYNCBUFFER SETUP (SinHost order) =====
     DEBUG_LOG("[DirettaOutput] 1. Opening...");
     m_syncBuffer->open(
-        DIRETTA::Sync::THRED_MODE(1),
+        DIRETTA::Sync::THRED_MODE(m_thredMode),  // ⭐ Use configured value
         ACQUA::Clock::MilliSeconds(100),
         0, "DirettaRenderer", 0, 0, 0, 0,
         DIRETTA::Sync::MSMODE_AUTO
@@ -1092,10 +1092,10 @@ if (isLowBitrate) {
     std::cout << "[DirettaOutput] Using configTransferAuto (smaller packets)" << std::endl;
     
     m_syncBuffer->configTransferAuto(
-        ACQUA::Clock::MicroSeconds(200),   // limitCycle
-        ACQUA::Clock::MicroSeconds(333),   // minCycle
-        ACQUA::Clock::MicroSeconds(10000)  // maxCycle
-    );
+    ACQUA::Clock::MicroSeconds(m_infoCycle),    // ⭐ Use InfoCycle
+    ACQUA::Clock::MicroSeconds(m_cycleMinTime), // ⭐ Use CycleMinTime
+    ACQUA::Clock::MicroSeconds(m_cycleTime)     // ⭐ Use CycleTime
+);
     std::cout << "[DirettaOutput] ✓ configTransferAuto (packets ~1-3k)" << std::endl;
 } else {
     // Pour Hi-Res (24bit, 88.2k+, DSD, etc.) : jumbo frames pour performance max
@@ -1104,8 +1104,8 @@ if (isLowBitrate) {
     DEBUG_LOG("[DirettaOutput] Using configTransferVarMax (jumbo frames)");
     
     m_syncBuffer->configTransferVarMax(
-        ACQUA::Clock::MicroSeconds(200)   // limitCycle
-    );
+    ACQUA::Clock::MicroSeconds(m_infoCycle)  // ⭐ Use InfoCycle
+);
     DEBUG_LOG("[DirettaOutput] ✓ configTransferVarMax (Packet Full mode, ~16k)");
 }
 DEBUG_LOG("[DirettaOutput] DEBUG: MTU passed to setSink: " << m_mtu);
