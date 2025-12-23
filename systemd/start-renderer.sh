@@ -23,7 +23,7 @@ RENDERER_BIN="/opt/diretta-renderer-upnp/DirettaRendererUPnP"
 CMD="$RENDERER_BIN"
 
 # Basic options
-CMD="$CMD --target-index $TARGET"
+CMD="$CMD --target $TARGET"
 CMD="$CMD --buffer $BUFFER"
 
 # Network interface option (CRITICAL for multi-homed systems)
