@@ -1,1699 +1,1197 @@
 /**
- * @file AudioEngine.cpp
- * @brief Audio Engine implementation - COMPLETE
+ * @file DirettaOutput.cpp
+ * @brief Diretta Output implementation
  */
 
-#include "AudioEngine.h"
+#include "DirettaOutput.h"
 #include <iostream>
-#include <thread>
 #include <cstring>
-#include <algorithm>  
+#include <thread>
+#include <chrono>
 
-extern "C" {
-
-// ============================================================================
-// Logging system - Variable globale définie dans main.cpp
-// ============================================================================
 extern bool g_verbose;
 #define DEBUG_LOG(x) if (g_verbose) { std::cout << x << std::endl; }
-#include <libavutil/opt.h>
-}
 
-// ============================================================================
-// AudioBuffer
-// ============================================================================
-
-AudioBuffer::AudioBuffer(size_t size)
-    : m_data(nullptr)
-    , m_size(0)
+DirettaOutput::DirettaOutput()
+    : m_mtu(1500)
+    , m_mtuManuallySet(false)
+    , m_bufferSeconds(2)
+    , m_connected(false)
+    , m_playing(false)
 {
-    if (size > 0) {
-        resize(size);
-    }
+    std::cout << "[DirettaOutput] Created" << std::endl;
 }
 
-AudioBuffer::~AudioBuffer() {
-    if (m_data) {
-        delete[] m_data;
-    }
-}
-
-void AudioBuffer::resize(size_t size) {
-    if (m_data) {
-        delete[] m_data;
-    }
-    m_size = size;
-    m_data = new uint8_t[size];
-}
-
-// ============================================================================
-// AudioDecoder
-// ============================================================================
-
-AudioDecoder::AudioDecoder()
-    : m_formatContext(nullptr)
-    , m_codecContext(nullptr)
-    , m_swrContext(nullptr)
-    , m_audioStreamIndex(-1)
-    , m_eof(false)
-    , m_rawDSD(false)         // ⭐ DSD mode off by default
-    , m_packet(nullptr)       // ⭐ Packet for raw reading
-    , m_remainingCount(0)
-{
-}
-
-AudioDecoder::~AudioDecoder() {
+DirettaOutput::~DirettaOutput() {
     close();
 }
 
-bool AudioDecoder::open(const std::string& url) {
-    std::cout << "[AudioDecoder] Opening: " << url.substr(0, 80) << "..." << std::endl;
-    
-    // Open input file
-    m_formatContext = avformat_alloc_context();
-    if (!m_formatContext) {
-        std::cerr << "[AudioDecoder] Failed to allocate format context" << std::endl;
-        return false;
+void DirettaOutput::setMTU(uint32_t mtu) {
+    if (m_connected) {
+        std::cerr << "[DirettaOutput] ⚠️  Cannot change MTU while connected" << std::endl;
+        return;
     }
     
-    // Configure FFmpeg options for robust HTTP streaming (Qobuz)
-    AVDictionary* options = nullptr;
+    m_mtu = mtu;
+    m_mtuManuallySet = true;
     
-    // Automatic reconnection on connection loss
-    av_dict_set(&options, "reconnect", "1", 0);
-    av_dict_set(&options, "reconnect_streamed", "1", 0);
-    av_dict_set(&options, "reconnect_delay_max", "5", 0);  // Max 5 seconds between retries
+    DEBUG_LOG("[DirettaOutput] ✓ MTU configured: " << m_mtu << " bytes");
     
-    // Timeout to avoid blocking indefinitely
-    av_dict_set(&options, "timeout", "10000000", 0);  // 10 seconds in microseconds
-    
-    // Improved network buffering
-    av_dict_set(&options, "buffer_size", "32768", 0);  // 32KB buffer
-    
-    // HTTP persistent connections
-    av_dict_set(&options, "http_persistent", "1", 0);
-    av_dict_set(&options, "multiple_requests", "1", 0);
-    
-    // User-Agent (some servers check it)
-    av_dict_set(&options, "user_agent", "DirettaRenderer/1.0", 0);
-    
-    // IMPORTANT: Ignore file size to avoid premature EOF
-    av_dict_set(&options, "ignore_eof", "1", 0);
-    
-    DEBUG_LOG("[AudioDecoder] Opening with streaming options (reconnect enabled)");
-    
-    if (avformat_open_input(&m_formatContext, url.c_str(), nullptr, &options) < 0) {
-        std::cerr << "[AudioDecoder] Failed to open input: " << url << std::endl;
-        av_dict_free(&options);
-        avformat_free_context(m_formatContext);
-        m_formatContext = nullptr;
-        return false;
+    if (mtu > 1500) {
+        std::cout << " (jumbo frames)";
     }
     
-    // Free unused options
-    av_dict_free(&options);
-    
-    // Retrieve stream information
-    if (avformat_find_stream_info(m_formatContext, nullptr) < 0) {
-        std::cerr << "[AudioDecoder] Failed to find stream info" << std::endl;
-        avformat_close_input(&m_formatContext);
-        return false;
-    }
-    
-    // Log duration information
-    if (m_formatContext->duration != AV_NOPTS_VALUE) {
-        int64_t duration_seconds = m_formatContext->duration / AV_TIME_BASE;
-        int64_t duration_ms = (m_formatContext->duration % AV_TIME_BASE) * 1000 / AV_TIME_BASE;
-        DEBUG_LOG("[AudioDecoder] Stream duration: " << duration_seconds << "." 
-                  << duration_ms << " seconds");
-    } else {
-        DEBUG_LOG("[AudioDecoder] Stream duration: unknown (live stream?)");
-    }
-    
-    // Find audio stream
-    m_audioStreamIndex = -1;
-    for (unsigned int i = 0; i < m_formatContext->nb_streams; i++) {
-        if (m_formatContext->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
-            m_audioStreamIndex = i;
-            break;
-        }
-    }
-    
-    if (m_audioStreamIndex == -1) {
-        std::cerr << "[AudioDecoder] No audio stream found" << std::endl;
-        avformat_close_input(&m_formatContext);
-        return false;
-    }
-    
-    AVStream* audioStream = m_formatContext->streams[m_audioStreamIndex];
-    AVCodecParameters* codecpar = audioStream->codecpar;
-    
-    // ═══════════════════════════════════════════════════════════
-    // DIAGNOSTIC: Detect Audirvana pre-decoded streams
-    // ═══════════════════════════════════════════════════════════
-    bool isAudirvana = false;
-    if (m_formatContext && m_formatContext->url) {
-        std::string urlStr(m_formatContext->url);
-        isAudirvana = (urlStr.find("audirvana") != std::string::npos);
-    }
+    std::cout << std::endl;
+}
 
-    if (isAudirvana) {
-        std::cout << "\n════════════════════════════════════════════════════════" << std::endl;
-        std::cout << "🎯 Audirvana detected - applying special handling" << std::endl;
-        std::cout << "════════════════════════════════════════════════════════" << std::endl;
+
+
+bool DirettaOutput::open(const AudioFormat& format, float bufferSeconds) {
+    DEBUG_LOG("[DirettaOutput] Opening: " 
+              << format.sampleRate << "Hz/" 
+              << format.bitDepth << "bit/" 
+              << format.channels << "ch");
+    
+    m_currentFormat = format;
+    m_totalSamplesSent = 0;
+    DEBUG_LOG("[DirettaOutput] ⭐ m_totalSamplesSent RESET to 0"); 
+    
+    // ✅ INTELLIGENT BUFFER ADAPTATION based on processing complexity
+    //
+    // Processing Pipeline Complexity:
+    // 1. DSD (DSF/DFF):        Raw bitstream read      → 0.8s  (instant)
+    // 2. WAV/AIFF:             Direct PCM read         → 1.0s  (very fast)
+    // 3. FLAC/ALAC/APE:        Lossless decompression  → 2.0s  (moderate)
+    //
+    // This matches Dominique's insight: Diretta can handle uncompressed 
+    // formats as efficiently as DSD, since both skip the decode step!
+    
+    float effectiveBuffer;
+    
+    if (format.isDSD) {
+        // DSD: Raw bitstream, zero decode overhead
+        effectiveBuffer = std::min(bufferSeconds, 0.8f);
+        DEBUG_LOG("[DirettaOutput] 🎵 DSD: raw bitstream path");
         
-        const AVCodec* diagnostic_codec = avcodec_find_decoder(codecpar->codec_id);
+    } else if (!format.isCompressed) {
+        // WAV/AIFF: Uncompressed PCM - intelligent buffer sizing
         
-        std::cout << "📊 Stream analysis:" << std::endl;
-        std::cout << "   Codec: " << (diagnostic_codec ? diagnostic_codec->name : "unknown") << std::endl;
-        std::cout << "   Sample rate: " << codecpar->sample_rate << " Hz" << std::endl;
-        std::cout << "   Channels: " << codecpar->ch_layout.nb_channels << std::endl;
-        std::cout << "   Bit depth: " << codecpar->bits_per_coded_sample << " bits" << std::endl;
-        
-        bool isPCM = (codecpar->codec_id >= AV_CODEC_ID_FIRST_AUDIO && 
-                      codecpar->codec_id <= AV_CODEC_ID_PCM_F64LE &&
-                      codecpar->codec_id != AV_CODEC_ID_DSD_LSBF &&
-                      codecpar->codec_id != AV_CODEC_ID_DSD_MSBF &&
-                      codecpar->codec_id != AV_CODEC_ID_DSD_MSBF_PLANAR &&
-                      codecpar->codec_id != AV_CODEC_ID_DSD_LSBF_PLANAR);
-        
-        if (isPCM) {
-            std::cout << "   → Already-decoded PCM detected" << std::endl;
-            std::cout << "   → Will use passthrough mode (no re-decoding)" << std::endl;
+        // ⚠️  LOOPBACK DETECTION (v1.0.10)
+        // Check if this is local playback (same-machine streaming)
+        // In loopback mode, data arrives in bursts without network buffering
+        bool isLoopback = false;
+        // Heuristic: If MTU is default (not jumbo), likely loopback wasn't configured
+        // Real network would use jumbo frames (16128)
+        // This is a simple heuristic - not perfect but works in most cases
+        if (m_mtu <= 1500) {
+            isLoopback = true;
         }
         
-        std::cout << "════════════════════════════════════════════════════════\n" << std::endl;
-    }
-    
-    // Find decoder
-    const AVCodec* codec = avcodec_find_decoder(codecpar->codec_id);
-    if (!codec) {
-        std::cerr << "[AudioDecoder] Codec not found" << std::endl;
-        avformat_close_input(&m_formatContext);
-        return false;
-    }
-    
-    // Allocate codec context
-    m_codecContext = avcodec_alloc_context3(codec);
-    if (!m_codecContext) {
-        std::cerr << "[AudioDecoder] Failed to allocate codec context" << std::endl;
-        avformat_close_input(&m_formatContext);
-        return false;
-    }
-    
-    // Copy codec parameters
-    if (avcodec_parameters_to_context(m_codecContext, codecpar) < 0) {
-        std::cerr << "[AudioDecoder] Failed to copy codec parameters" << std::endl;
-        avcodec_free_context(&m_codecContext);
-        avformat_close_input(&m_formatContext);
-        return false;
-    }
-    
-    // Open codec
-    if (avcodec_open2(m_codecContext, codec, nullptr) < 0) {
-        std::cerr << "[AudioDecoder] Failed to open codec" << std::endl;
-        avcodec_free_context(&m_codecContext);
-        avformat_close_input(&m_formatContext);
-        return false;
-    }
-    
-    // Fill track info
-    m_trackInfo.sampleRate = codecpar->sample_rate;
-    m_trackInfo.channels = codecpar->ch_layout.nb_channels;
-    m_trackInfo.codec = codec->name;
-    
-    // ✅ Classify codec complexity for buffer optimization
-    // Uncompressed formats (WAV/AIFF): minimal latency
-    // Compressed formats (FLAC/ALAC): need decoding buffer
-    bool isUncompressedPCM = (
-        codecpar->codec_id == AV_CODEC_ID_PCM_S16LE ||
-        codecpar->codec_id == AV_CODEC_ID_PCM_S16BE ||
-        codecpar->codec_id == AV_CODEC_ID_PCM_S24LE ||
-        codecpar->codec_id == AV_CODEC_ID_PCM_S24BE ||
-        codecpar->codec_id == AV_CODEC_ID_PCM_S32LE ||
-        codecpar->codec_id == AV_CODEC_ID_PCM_S32BE
-    );
-    
-    m_trackInfo.isCompressed = !isUncompressedPCM;
-    
-    if (isUncompressedPCM) {
-        DEBUG_LOG("[AudioDecoder] ✓ Uncompressed PCM (WAV/AIFF) - low latency path");
-    } else {
-        DEBUG_LOG("[AudioDecoder] ℹ️  Compressed format (" << codec->name 
-                  << ") - decoding required");
-    }
-    
-    // Check if DSD - CRITICAL: Use RAW mode for native DSD!
-    m_trackInfo.isDSD = false;
-    if (codecpar->codec_id == AV_CODEC_ID_DSD_LSBF ||
-        codecpar->codec_id == AV_CODEC_ID_DSD_MSBF ||
-        codecpar->codec_id == AV_CODEC_ID_DSD_MSBF_PLANAR ||
-        codecpar->codec_id == AV_CODEC_ID_DSD_LSBF_PLANAR) {
-        
-        // ⚠️  Check if this is Audirvana (which pre-decodes/wraps DSD strangely)
-        if (isAudirvana) {
-            // ════════════════════════════════════════════════════════
-            // AUDIRVANA DSD: Use FFmpeg decoding (NOT raw mode)
-            // ════════════════════════════════════════════════════════
-            std::cout << "[AudioDecoder] ⚠️  Audirvana DSD: Using FFmpeg decoding" << std::endl;
-            std::cout << "[AudioDecoder]     (Audirvana sends DSD with strange wrapper)" << std::endl;
-            
-            m_rawDSD = false;  // Let FFmpeg decode
-            m_trackInfo.isDSD = false;  // Treat as PCM for Diretta
-            
-            // Will fall through to standard PCM decoding below
-            // FFmpeg will convert the "fltp" format to PCM
-            
-        } else {
-            // ════════════════════════════════════════════════════════
-            // OTHER SOURCES: Use DSD native mode
-            // ════════════════════════════════════════════════════════
-            std::cout << "[AudioDecoder] ════════════════════════════════════════" << std::endl;
-            std::cout << "[AudioDecoder] 🎵 DSD NATIVE MODE ACTIVATED!" << std::endl;
-            std::cout << "[AudioDecoder] ════════════════════════════════════════" << std::endl;
-            
-            m_trackInfo.isDSD = true;
-            m_trackInfo.bitDepth = 1; // DSD is 1-bit
-            
-            // CRITICAL: FFmpeg reports packet rate, not DSD bit rate!
-            // For DSD: bit_rate = packet_rate × 8 (8 bits per byte)
-            // DSD64 = 2822400 Hz, but FFmpeg reports 352800 Hz (packet rate)
-            uint32_t packetRate = codecpar->sample_rate;  // 352800 for DSD64
-            uint32_t dsdBitRate = packetRate * 8;          // 2822400 for DSD64
-            
-            m_trackInfo.sampleRate = dsdBitRate;  // ⭐ Use TRUE DSD bit rate!
-            
-            // Determine DSD rate (DSD64, DSD128, etc.)
-            // DSD64 = 2822400 Hz = 44100 * 64
-            int dsdMultiplier = dsdBitRate / 44100;
-            m_trackInfo.dsdRate = dsdMultiplier;
-            
-            DEBUG_LOG("[AudioDecoder] 🎵 DSD" << dsdMultiplier << " detected!");
-            DEBUG_LOG("[AudioDecoder]    FFmpeg packet rate: " << packetRate << " Hz");
-            DEBUG_LOG("[AudioDecoder]    True DSD bit rate: " << dsdBitRate << " Hz");
-            DEBUG_LOG("[AudioDecoder] ⚠️  NO DECODING - Reading raw DSD packets!");
-            
-            // ⭐ CRITICAL: Activate RAW DSD mode
-            m_rawDSD = true;
-            m_packet = av_packet_alloc();
-            
-            // ⭐ DO NOT open codec for DSD!
-            // We'll read raw packets with av_read_frame()
-            DEBUG_LOG("[AudioDecoder] ✓ DSD Native mode ready");
-            
-            // Calculate duration
-            if (audioStream->duration != AV_NOPTS_VALUE) {
-                m_trackInfo.duration = av_rescale_q(audioStream->duration, 
-                                                    audioStream->time_base,
-                                                    {1, (int)m_trackInfo.sampleRate});
+        if (format.bitDepth >= 24 && format.sampleRate >= 88200) {
+            // Hi-Res audio handling
+            if (isLoopback && format.sampleRate <= 96000) {
+                // Loopback + Hi-Res ≤96kHz: needs larger buffer
+                // Reason: Data arrives in bursts, need extra buffer to prevent underruns
+                effectiveBuffer = std::max(std::min(bufferSeconds, 2.5f), 1.5f);
+                DEBUG_LOG("[DirettaOutput] ⚠️  Loopback Hi-Res detected (" << format.bitDepth 
+                          << "bit/" << format.sampleRate << "Hz)");
+                DEBUG_LOG("[DirettaOutput]   Using 2-2.5s buffer (burst protection)");
+                DEBUG_LOG("[DirettaOutput]   💡 TIP: For lower latency, use remote player");
+                DEBUG_LOG("[DirettaOutput]        or enable oversampling in your player");
             } else {
+                // Network or high sample rate: normal buffer
+                effectiveBuffer = std::max(std::min(bufferSeconds, 1.5f), 1.2f);
+                DEBUG_LOG("[DirettaOutput] ✓ Hi-Res PCM (" << format.bitDepth 
+                          << "bit/" << format.sampleRate << "Hz): enhanced buffer");
+                DEBUG_LOG("[DirettaOutput]   Buffer: " << effectiveBuffer 
+                          << "s (DAC stabilization)");
             }
-            
-            m_eof = false;
-            
-            std::cout << "[AudioDecoder] ✓ Opened successfully (DSD NATIVE)" << std::endl;
-            
-            return true;  // ⭐ Exit early - no codec opening needed!
-        }  // End of else (non-Audirvana DSD native mode)
-    }  // End of DSD detection
-    
-    // ══════════════════════════════════════════════════════════════
-    // PCM MODE - Open codec and prepare for decoding
-    // ══════════════════════════════════════════════════════════════
-    
-    m_rawDSD = false;  // Not DSD, use normal decoding
-    
-    // PCM format detection
-    switch (codecpar->format) {
-        case AV_SAMPLE_FMT_S16:
-        case AV_SAMPLE_FMT_S16P:
-            m_trackInfo.bitDepth = 16;
-            break;
-        case AV_SAMPLE_FMT_S32:
-        case AV_SAMPLE_FMT_S32P:
-            m_trackInfo.bitDepth = 32;
-            break;
-        case AV_SAMPLE_FMT_FLT:
-        case AV_SAMPLE_FMT_FLTP:
-            m_trackInfo.bitDepth = 32; // Float treated as 32-bit
-            break;
-        default:
-            m_trackInfo.bitDepth = 24; // Default assumption
-            break;
-    }
-
-    m_rawDSD = false;  // Not DSD, use normal decoding
-    
-    // ⭐ CRITICAL FIX: Detect REAL bit depth from source
-    int realBitDepth = 0;
-    
-    // Method 1: Try bits_per_raw_sample (most reliable for FLAC/ALAC)
-    if (codecpar->bits_per_raw_sample > 0 && codecpar->bits_per_raw_sample <= 32) {
-        realBitDepth = codecpar->bits_per_raw_sample;
-        DEBUG_LOG("[AudioDecoder] ✓ Real bit depth from bits_per_raw_sample: " 
-                  << realBitDepth << " bits");
-    }
-    // Method 2: Deduce from codec ID (for PCM formats like WAV)
-    else if (codecpar->codec_id == AV_CODEC_ID_PCM_S16LE || 
-             codecpar->codec_id == AV_CODEC_ID_PCM_S16BE) {
-        realBitDepth = 16;
-        DEBUG_LOG("[AudioDecoder] ✓ Bit depth from codec ID (PCM16): 16 bits");
-    }
-    else if (codecpar->codec_id == AV_CODEC_ID_PCM_S24LE || 
-             codecpar->codec_id == AV_CODEC_ID_PCM_S24BE) {
-        realBitDepth = 24;
-        DEBUG_LOG("[AudioDecoder] ✓ Bit depth from codec ID (PCM24): 24 bits");
-    }
-    else if (codecpar->codec_id == AV_CODEC_ID_PCM_S32LE || 
-             codecpar->codec_id == AV_CODEC_ID_PCM_S32BE) {
-        realBitDepth = 32;
-        DEBUG_LOG("[AudioDecoder] ✓ Bit depth from codec ID (PCM32): 32 bits");
-    }
-    
-    // Method 3: Fallback to FFmpeg's internal format
-    if (realBitDepth == 0) {
-        DEBUG_LOG("[AudioDecoder] ⚠️  bits_per_raw_sample not available, using format detection");
+        } else {
+            // Standard PCM: low latency
+            effectiveBuffer = std::min(bufferSeconds, 1.0f);
+            DEBUG_LOG("[DirettaOutput] ✓ Uncompressed PCM: low-latency path");
+            DEBUG_LOG("[DirettaOutput]   Buffer: " << effectiveBuffer << "s");
+        }
         
-        switch (codecpar->format) {
-            case AV_SAMPLE_FMT_S16:
-            case AV_SAMPLE_FMT_S16P:
-                realBitDepth = 16;
-                break;
-            case AV_SAMPLE_FMT_S32:
-            case AV_SAMPLE_FMT_S32P:
-                realBitDepth = 32;
-                break;
-            case AV_SAMPLE_FMT_FLT:
-            case AV_SAMPLE_FMT_FLTP:
-                realBitDepth = 32;
-                break;
-            default:
-                realBitDepth = 24;
-                DEBUG_LOG("[AudioDecoder] ⚠️  Unknown format, defaulting to 24-bit");
-                break;
+    } else {
+        // FLAC/ALAC/etc: Compressed, needs decoding buffer
+        effectiveBuffer = std::max(bufferSeconds, 0.8f);
+        DEBUG_LOG("[DirettaOutput] ℹ️  Compressed PCM (FLAC/ALAC): decoding required");
+        
+        if (bufferSeconds < 2) {
+            DEBUG_LOG("[DirettaOutput]   Using 2s minimum for decode stability");
         }
     }
     
-    // Safety check
-    if (realBitDepth != 16 && realBitDepth != 24 && realBitDepth != 32) {
-        std::cerr << "[AudioDecoder] ❌ Invalid bit depth detected: " << realBitDepth 
-                  << ", falling back to 24-bit" << std::endl;
-        realBitDepth = 24;
+    m_bufferSeconds = effectiveBuffer;
+    DEBUG_LOG("[DirettaOutput] → Effective buffer: " << m_bufferSeconds << "s");
+    
+    // Find Diretta target
+    DEBUG_LOG("[DirettaOutput] Finding Diretta target...");
+    if (!findAndSelectTarget(m_targetIndex)) {  // Use configured target index
+        std::cerr << "[DirettaOutput] ❌ Failed to find or select Diretta target" << std::endl;
+        return false;
     }
     
-    m_trackInfo.bitDepth = realBitDepth;
-
-
-DEBUG_LOG("[AudioDecoder] 🎵 PCM: " << m_trackInfo.codec 
-          << " " << m_trackInfo.sampleRate << "Hz/"
-          << m_trackInfo.bitDepth << "bit/"
-          << m_trackInfo.channels << "ch")
-
+    DEBUG_LOG("[DirettaOutput] ✓ Found Diretta target");
     
-    DEBUG_LOG("[AudioDecoder] 🎵 PCM: " << m_trackInfo.codec 
-              << " " << m_trackInfo.sampleRate << "Hz/"
-              << m_trackInfo.bitDepth << "bit/"
-              << m_trackInfo.channels << "ch");
-    
-    // Calculate duration
-    if (audioStream->duration != AV_NOPTS_VALUE) {
-        m_trackInfo.duration = av_rescale_q(audioStream->duration, 
-                                            audioStream->time_base,
-                                            {1, (int)m_trackInfo.sampleRate});
-    } else {
-        m_trackInfo.duration = 0;
+// Configure and connect (with retry for slow DACs)
+const int CONFIG_MAX_RETRIES = 3;
+bool configured = false;
+int attempt = 1;
+
+for (attempt = 1; attempt <= CONFIG_MAX_RETRIES && !configured; attempt++) {
+    if (attempt > 1) {
+        std::cout << "[DirettaOutput] ⚠️  Configuration attempt " << attempt 
+                  << "/" << CONFIG_MAX_RETRIES << " (DAC may be initializing...)" << std::endl;
+        std::this_thread::sleep_for(std::chrono::seconds(1));
     }
     
-    m_eof = false;
+    configured = configureDiretta(format);
     
-    std::cout << "[AudioDecoder] ✓ Opened successfully" << std::endl;
+    if (!configured && attempt < CONFIG_MAX_RETRIES) {
+        DEBUG_LOG("[DirettaOutput] Configuration failed, retrying...");
+    }
+}
+
+if (!configured) {
+    std::cerr << "[DirettaOutput] ❌ Failed to configure Diretta after " 
+              << CONFIG_MAX_RETRIES << " attempts" << std::endl;
+    std::cerr << "[DirettaOutput] 💡 Possible causes:" << std::endl;
+    std::cerr << "[DirettaOutput]    - DAC not fully initialized (wait 30s after power-on)" << std::endl;
+    std::cerr << "[DirettaOutput]    - Unsupported audio format" << std::endl;
+    std::cerr << "[DirettaOutput]    - DAC firmware issue" << std::endl;
+    return false;
+}
+
+if (attempt > 2) {  // Si on a réussi après plus d'une tentative
+    std::cout << "[DirettaOutput] ✅ Configuration succeeded on attempt " << (attempt - 1) << std::endl;
+}
+    
+    m_connected = true;
+    std::cout << "[DirettaOutput] ✓ Connected and configured" << std::endl;
     
     return true;
 }
 
-void AudioDecoder::close() {
-    if (m_swrContext) {
-        swr_free(&m_swrContext);
+void DirettaOutput::close() {
+    if (!m_connected) {
+        return;
     }
-    if (m_codecContext) {
-        avcodec_free_context(&m_codecContext);
+    
+    DEBUG_LOG("[DirettaOutput] Closing...");
+    
+    // ⚠️  Don't call stop() here if already stopped - avoids double pre_disconnect
+    // The onStop callback already called stop(true) for immediate response
+    
+    // Disconnect SyncBuffer
+    if (m_syncBuffer) {
+        DEBUG_LOG("[DirettaOutput] Disconnecting SyncBuffer...");
+        // Only disconnect if still playing (avoid double disconnect)
+        if (m_playing) {
+            DEBUG_LOG("[DirettaOutput] ⚠️  Still playing, forcing immediate disconnect");
+            m_syncBuffer->pre_disconnect(true); // Immediate
+        }
+        m_syncBuffer.reset();
     }
-    if (m_packet) {  // ⭐ Free DSD packet
-        av_packet_free(&m_packet);
-    }
-    if (m_formatContext) {
-        avformat_close_input(&m_formatContext);
-    }
-    m_audioStreamIndex = -1;
-    m_eof = false;
-    m_rawDSD = false;  // ⭐ Reset DSD flag
+    
+    m_udp.reset();
+    m_raw.reset();
+    m_connected = false;
+    m_playing = false;  // Ensure clean state
+    
+    std::cout << "[DirettaOutput] ✓ Closed" << std::endl;
 }
 
-size_t AudioDecoder::readSamples(AudioBuffer& buffer, size_t numSamples,
-                                uint32_t outputRate, uint32_t outputBits) {
+bool DirettaOutput::play() {
+    if (!m_connected) {
+        std::cerr << "[DirettaOutput] ❌ Not connected" << std::endl;
+        return false;
+    }
     
-    // ══════════════════════════════════════════════════════════════
-    // DSD NATIVE MODE - Read raw packets without decoding
-    // ══════════════════════════════════════════════════════════════
-    if (m_rawDSD) {
-        m_readCallCount++;
-    if (m_readCallCount % 100 == 0) {
-        DEBUG_LOG("[readSamples] Call " << m_readCallCount);
+    if (m_playing) {
+        return true; // Already playing
+    }
+    
+    DEBUG_LOG("[DirettaOutput] Starting playback...");
+    
+    if (!m_syncBuffer) {
+        std::cerr << "[DirettaOutput] ❌ SyncBuffer not initialized" << std::endl;
+        return false;
+    }
+    
+    m_syncBuffer->play();
+    m_playing = true;
+    
+    std::cout << "[DirettaOutput] ✓ Playing" << std::endl;
+    
+    return true;
 }
-        
-        if (m_eof) {
-            DEBUG_LOG("[AudioDecoder::readSamples] EOF flag set, returning 0");
-            return 0;
-        }
-        
-        size_t bytesPerSample = 1;  // DSD: 1 byte per 8 samples per channel, but we'll work in bytes
-        (void)bytesPerSample;  // Silence unused variable warning
-        size_t totalBytesNeeded = (numSamples * m_trackInfo.channels) / 8;
-        size_t totalBytesRead = 0;
-        
-        // Ensure buffer is large enough
-        if (buffer.size() < totalBytesNeeded) {
-            buffer.resize(totalBytesNeeded);
-        }
-        
-        uint8_t* outputPtr = buffer.data();
-        
-        // CRITICAL: First, use remaining samples from internal buffer
-        if (m_remainingCount > 0) {
-            size_t bytesToUse = std::min(m_remainingCount, totalBytesNeeded);
-            memcpy(outputPtr, m_remainingSamples.data(), bytesToUse);
-            outputPtr += bytesToUse;
-            totalBytesRead += bytesToUse;
+
+void DirettaOutput::stop(bool immediate) {
+    if (!m_playing) {
+        DEBUG_LOG("[DirettaOutput] ⚠️  stop() called but not playing");
+        return;
+    }
+    
+    DEBUG_LOG("[DirettaOutput] 🛑 Stopping (immediate=" << immediate << ")...");
+    
+    if (m_syncBuffer) {
+        if (!immediate) {
+            // ⭐ DRAIN buffers before stopping (graceful stop)
+            DEBUG_LOG("[DirettaOutput] Draining buffers before stop...");
+            int drain_timeout_ms = 5000;
+            int drain_waited_ms = 0;
             
-            // Shift remaining data
-            if (bytesToUse < m_remainingCount) {
-                size_t remaining = m_remainingCount - bytesToUse;
-                memmove(m_remainingSamples.data(), 
-                        m_remainingSamples.data() + bytesToUse,
-                        remaining);
-                m_remainingCount = remaining;
-            } else {
-                m_remainingCount = 0;
-            }
-            
-            // If we have enough, return now
-            if (totalBytesRead >= totalBytesNeeded) {
-                return numSamples;
-            }
-        }
-        
-        // Need more data - read packets
-        while (totalBytesRead < totalBytesNeeded) {
-            int ret = av_read_frame(m_formatContext, m_packet);
-            if (ret < 0) {
-                if (ret == AVERROR_EOF) {
-                    DEBUG_LOG("[AudioDecoder] EOF reached (DSD)");
-                    m_eof = true;
+            while (drain_waited_ms < drain_timeout_ms) {
+                if (m_syncBuffer->buffer_empty()) {
+                    DEBUG_LOG("[DirettaOutput] ✓ Buffers drained");
+                    break;
                 }
+                
+                if (drain_waited_ms % 200 == 0) {
+                    size_t buffered = m_syncBuffer->getLastBufferCount();
+                    DEBUG_LOG("[DirettaOutput]    Waiting... (" << buffered << " samples buffered)");
+                }
+                
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                drain_waited_ms += 50;
+            }
+            
+            if (drain_waited_ms >= drain_timeout_ms) {
+                std::cerr << "[DirettaOutput] ⚠️  Drain timeout, forcing immediate stop" << std::endl;
+                immediate = true;  // Force immediate if timeout
+            }
+        }
+        
+        DEBUG_LOG("[DirettaOutput] Calling pre_disconnect(" << immediate << ")...");
+        auto start = std::chrono::steady_clock::now();
+        
+        m_syncBuffer->pre_disconnect(immediate);
+        
+        auto end = std::chrono::steady_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+        DEBUG_LOG("[DirettaOutput] ✓ pre_disconnect completed in " << duration.count() << "ms");
+        DEBUG_LOG("[DirettaOutput] Calling seek_front() to reset buffer...");
+        m_syncBuffer->seek_front();
+        DEBUG_LOG("[DirettaOutput] ✓ Buffer reset to front");
+    } else {
+        std::cout << "[DirettaOutput] ⚠️  No SyncBuffer to disconnect" << std::endl;
+    }
+    
+    m_playing = false;
+    m_isPaused = false;      // Reset état pause
+    m_pausedPosition = 0;    // Reset position sauvegardée
+    m_totalSamplesSent = 0;
+    DEBUG_LOG("[DirettaOutput] ⭐ m_totalSamplesSent RESET to 0");
+    
+    std::cout << "[DirettaOutput] ✓ Stopped" << std::endl;
+}
+
+void DirettaOutput::pause() {
+    if (!m_playing || m_isPaused) {
+        return;
+    }
+    
+    DEBUG_LOG("[DirettaOutput] ⏸️  Pausing...");
+    
+    // Sauvegarder la position actuelle
+    m_pausedPosition = m_totalSamplesSent;
+    
+    // Arrêter la lecture
+    if (m_syncBuffer) {
+        m_syncBuffer->stop();
+    }
+    
+    m_isPaused = true;
+    m_playing = false;
+    
+    DEBUG_LOG("[DirettaOutput] ✓ Paused at sample " << m_pausedPosition);
+}
+
+void DirettaOutput::resume() {
+    if (!m_isPaused) {
+        return;
+    }
+    
+    DEBUG_LOG("[DirettaOutput] ▶️  Resuming from sample " << m_pausedPosition << "...");
+    
+    if (m_syncBuffer) {
+        // Seek à la position sauvegardée
+        m_syncBuffer->seek(m_pausedPosition);
+        
+        // Redémarrer la lecture
+        m_syncBuffer->play();
+    }
+    
+    m_isPaused = false;
+    m_playing = true;
+    
+    std::cout << "[DirettaOutput] ✓ Resumed" << std::endl;
+}
+
+
+
+
+
+bool DirettaOutput::changeFormat(const AudioFormat& newFormat) {
+    std::cout << "[DirettaOutput] Format change request: "
+              << m_currentFormat.sampleRate << "Hz/" << m_currentFormat.bitDepth << "bit"
+              << " → " << newFormat.sampleRate << "Hz/" << newFormat.bitDepth << "bit" << std::endl;
+    
+    if (newFormat == m_currentFormat) {
+        std::cout << "[DirettaOutput] ✓ Same format, no change needed" << std::endl;
+        return true;
+    }
+    
+    std::cout << "[DirettaOutput] ⚠️  Format change during playback - CRITICAL DRAIN REQUIRED" << std::endl;
+    
+    if (m_syncBuffer) {
+        // ⭐ STEP 1: STOP SENDING NEW DATA (caller must stop feeding audio)
+        std::cout << "[DirettaOutput] 1. Stop sending new audio data..." << std::endl;
+        
+        // ⭐ STEP 2: WAIT FOR ALL QUEUED BUFFERS TO BE PLAYED
+        std::cout << "[DirettaOutput] 2. Draining queued buffers..." << std::endl;
+        int drain_timeout_ms = 10000;  // 10 seconds max for drain
+        int drain_waited_ms = 0;
+        
+        // Get initial buffer count
+        size_t initialBuffered = m_syncBuffer->getLastBufferCount();
+        std::cout << "[DirettaOutput]    Initial buffered samples: " << initialBuffered << std::endl;
+        
+        // Wait until buffer is empty
+        while (drain_waited_ms < drain_timeout_ms) {
+            if (m_syncBuffer->buffer_empty()) {
+                std::cout << "[DirettaOutput]    ✓ All buffers drained!" << std::endl;
                 break;
             }
             
-            // Skip non-audio packets
-            if (m_packet->stream_index != m_audioStreamIndex) {
-                av_packet_unref(m_packet);
-                continue;
+            // Log progress every 200ms
+            if (drain_waited_ms % 200 == 0) {
+                size_t buffered = m_syncBuffer->getLastBufferCount();
+                DEBUG_LOG("[DirettaOutput]    Waiting... (" << buffered << " samples remaining)");
             }
             
-            size_t dataSize = m_packet->size;
-            
-            // Debug: count packets
-            // Removed static variable - now m_packetCount (instance member)
-               m_packetCount++;
-            
-            // ⚠️  TEST: DON'T skip any packets - all contain audio data
-            /*
-            if (m_packetCount <= 10) {
-                if (!m_dsdWarningShown) {
-                    DEBUG_LOG("[AudioDecoder] ⚠️  Skipping first 10 packets (header/padding)");
-                    m_dsdWarningShown = true;
-                }
-                av_packet_unref(m_packet);
-                continue;
-            }
-            */
-            
-            // DEBUG: Always log packet processing
-            if (m_packetCount <= 50) {
-                DEBUG_LOG("[AudioDecoder] 📦 Processing packet #" << m_packetCount 
-                          << ", size=" << dataSize << " bytes"
-                          << ", need=" << (totalBytesNeeded - totalBytesRead) << " bytes more");
-            }
-            
-            // Process this packet
-            size_t bytesNeeded = totalBytesNeeded - totalBytesRead;
-            
-            if (dataSize <= bytesNeeded) {
-                // Use entire packet
-                memcpy(outputPtr, m_packet->data, dataSize);
-                outputPtr += dataSize;
-                totalBytesRead += dataSize;
-            } else {
-                // Use part of packet, save rest to buffer
-                memcpy(outputPtr, m_packet->data, bytesNeeded);
-                totalBytesRead += bytesNeeded;
-                
-                // Save remaining to internal buffer
-                size_t remainingBytes = dataSize - bytesNeeded;
-                if (m_remainingSamples.size() < remainingBytes) {
-                    m_remainingSamples.resize(remainingBytes);
-                }
-                memcpy(m_remainingSamples.data(), 
-                       m_packet->data + bytesNeeded, 
-                       remainingBytes);
-                m_remainingCount = remainingBytes;
-            }
-            
-            av_packet_unref(m_packet);
-            
-            // Debug first few times
-            if (m_packetCount <= 15) {
-                DEBUG_LOG("[AudioDecoder] Packet #" << m_packetCount 
-                          << ": used " << std::min(dataSize, bytesNeeded) << " bytes"
-                          << " (total: " << totalBytesRead << "/" << totalBytesNeeded << ")");
-            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            drain_waited_ms += 50;
         }
         
-        // ✅ FINAL WORKING CONFIGURATION (discovered through testing)
-        // These exact settings are required for proper DSD playback:
-        const bool ENABLE_INTERLEAVING = true;   // REQUIRED for stereo (prevents 2× speed
-        const bool ENABLE_BIT_REVERSAL = false;  // NOT needed for DSF files
-        const bool INTERLEAVE_BY_BYTE = false;   // Use 32-bit word interleaving
-        (void)ENABLE_BIT_REVERSAL;  // Silence unused variable warning
-        
-        // Convert PLANAR to INTERLEAVED if enabled
-        if (ENABLE_INTERLEAVING && m_trackInfo.channels == 2) {
-            // FFmpeg gives: [LLLL...][RRRR...] (planar by channel)
-            
-            // Create temp buffer for interleaving
-            AudioBuffer tempBuffer(totalBytesRead);
-            memcpy(tempBuffer.data(), buffer.data(), totalBytesRead);
-            
-            size_t bytesPerChannel = totalBytesRead / 2;
-            
-            if (INTERLEAVE_BY_BYTE) {
-                // Interleave BYTE by BYTE: [L0 R0 L1 R1 L2 R2...]
-                uint8_t* src = tempBuffer.data();
-                uint8_t* dst = buffer.data();
-                
-                for (size_t i = 0; i < bytesPerChannel; i++) {
-                    dst[i * 2]     = src[i];                     // Left byte
-                    dst[i * 2 + 1] = src[bytesPerChannel + i];   // Right byte
-                }
-            
-                if (!m_interleavingLoggedDOP) {
-                    DEBUG_LOG("[AudioDecoder] 🔄 PLANAR → INTERLEAVED (byte-by-byte)");
-                    m_interleavingLoggedDOP = true;
-                }
-            } else {
-                // ✅ WORKING: Interleave by 32-bit WORDS
-                size_t wordsPerChannel = bytesPerChannel / 4;
-                
-                uint32_t* src = reinterpret_cast<uint32_t*>(tempBuffer.data());
-                uint32_t* dst = reinterpret_cast<uint32_t*>(buffer.data());
-                
-                for (size_t i = 0; i < wordsPerChannel; i++) {
-                    dst[i * 2]     = src[i];                      // Left word
-                    dst[i * 2 + 1] = src[wordsPerChannel + i];    // Right word
-                }
-                if (!m_interleavingLoggedNative) {
-                    DEBUG_LOG("[AudioDecoder] ✅ PLANAR → INTERLEAVED (32-bit words)");
-                    m_interleavingLoggedNative = true;
-                }
-            }
-        }
-
-
-    // ✅ DEBUG: Dump first 64 bytes to understand Audirvana's format
-    if (g_verbose) {
-    if (!m_dumpedFirstPacket && totalBytesRead >= 64) {
-        std::cout << "\n[DEBUG] First 64 bytes from Audirvana DFF:" << std::endl;
-        std::cout << "[DEBUG] Hex dump:" << std::endl;
-        
-        const uint8_t* data = buffer.data();
-        for (int i = 0; i < 64; i++) {
-            printf("%02X ", data[i]);
-            if ((i + 1) % 16 == 0) printf("\n");
-        }
-        
-        std::cout << "\n[DEBUG] Codec: " << m_trackInfo.codec << std::endl;
-        std::cout << "[DEBUG] Sample rate: " << m_trackInfo.sampleRate << std::endl;
-        std::cout << "[DEBUG] Channels: " << m_trackInfo.channels << std::endl;
-        
-        m_dumpedFirstPacket = true;
-    }
-    }
-
-    // ✅ CRITICAL: Convert DFF for Diretta (Bit reversal ONLY, no byte swap)
-    // According to SDK: FMT_DSD_SIZ_32 uses Little Endian for BOTH DSF and DFF
-    // Only the BIT order differs (LSB vs MSB)
-    // ⚠️  EXCEPTION: Audirvana serves DSF with .dff URL, skip bit reversal
-    bool isAudirvana = false;
-    if (m_formatContext && m_formatContext->url) {
-        std::string url(m_formatContext->url);
-        isAudirvana = (url.find("audirvana") != std::string::npos);
-    }
-
-    if (m_trackInfo.codec.find("msbf") != std::string::npos && !isAudirvana) {
-        uint8_t* data = buffer.data();
-        
-        // Lookup table for bit reversal
-        static const uint8_t bitReverseTable[256] = {
-            0x00, 0x80, 0x40, 0xC0, 0x20, 0xA0, 0x60, 0xE0, 0x10, 0x90, 0x50, 0xD0, 0x30, 0xB0, 0x70, 0xF0,
-            0x08, 0x88, 0x48, 0xC8, 0x28, 0xA8, 0x68, 0xE8, 0x18, 0x98, 0x58, 0xD8, 0x38, 0xB8, 0x78, 0xF8,
-            0x04, 0x84, 0x44, 0xC4, 0x24, 0xA4, 0x64, 0xE4, 0x14, 0x94, 0x54, 0xD4, 0x34, 0xB4, 0x74, 0xF4,
-            0x0C, 0x8C, 0x4C, 0xCC, 0x2C, 0xAC, 0x6C, 0xEC, 0x1C, 0x9C, 0x5C, 0xDC, 0x3C, 0xBC, 0x7C, 0xFC,
-            0x02, 0x82, 0x42, 0xC2, 0x22, 0xA2, 0x62, 0xE2, 0x12, 0x92, 0x52, 0xD2, 0x32, 0xB2, 0x72, 0xF2,
-            0x0A, 0x8A, 0x4A, 0xCA, 0x2A, 0xAA, 0x6A, 0xEA, 0x1A, 0x9A, 0x5A, 0xDA, 0x3A, 0xBA, 0x7A, 0xFA,
-            0x06, 0x86, 0x46, 0xC6, 0x26, 0xA6, 0x66, 0xE6, 0x16, 0x96, 0x56, 0xD6, 0x36, 0xB6, 0x76, 0xF6,
-            0x0E, 0x8E, 0x4E, 0xCE, 0x2E, 0xAE, 0x6E, 0xEE, 0x1E, 0x9E, 0x5E, 0xDE, 0x3E, 0xBE, 0x7E, 0xFE,
-            0x01, 0x81, 0x41, 0xC1, 0x21, 0xA1, 0x61, 0xE1, 0x11, 0x91, 0x51, 0xD1, 0x31, 0xB1, 0x71, 0xF1,
-            0x09, 0x89, 0x49, 0xC9, 0x29, 0xA9, 0x69, 0xE9, 0x19, 0x99, 0x59, 0xD9, 0x39, 0xB9, 0x79, 0xF9,
-            0x05, 0x85, 0x45, 0xC5, 0x25, 0xA5, 0x65, 0xE5, 0x15, 0x95, 0x55, 0xD5, 0x35, 0xB5, 0x75, 0xF5,
-            0x0D, 0x8D, 0x4D, 0xCD, 0x2D, 0xAD, 0x6D, 0xED, 0x1D, 0x9D, 0x5D, 0xDD, 0x3D, 0xBD, 0x7D, 0xFD,
-            0x03, 0x83, 0x43, 0xC3, 0x23, 0xA3, 0x63, 0xE3, 0x13, 0x93, 0x53, 0xD3, 0x33, 0xB3, 0x73, 0xF3,
-            0x0B, 0x8B, 0x4B, 0xCB, 0x2B, 0xAB, 0x6B, 0xEB, 0x1B, 0x9B, 0x5B, 0xDB, 0x3B, 0xBB, 0x7B, 0xFB,
-            0x07, 0x87, 0x47, 0xC7, 0x27, 0xA7, 0x67, 0xE7, 0x17, 0x97, 0x57, 0xD7, 0x37, 0xB7, 0x77, 0xF7,
-            0x0F, 0x8F, 0x4F, 0xCF, 0x2F, 0xAF, 0x6F, 0xEF, 0x1F, 0x9F, 0x5F, 0xDF, 0x3F, 0xBF, 0x7F, 0xFF
-        };
-        
-        // Bit reversal ONLY (no byte swap!)
-        for (size_t i = 0; i < totalBytesRead; i++) {
-            data[i] = bitReverseTable[data[i]];
-        }
-    
-        if (!m_bitReversalLogged) {
-            std::cout << "[AudioDecoder] 🔄 DFF: Bit reversal ONLY (MSB→LSB, keep LE)" << std::endl;
-            m_bitReversalLogged = true;
-        }
-      }else if (isAudirvana) {
-
-        if (!m_resamplingLogged) {
-        std::cout << "[AudioDecoder] ⚠️  Audirvana detected: Skipping bit reversal" << std::endl;
-        std::cout << "[AudioDecoder]     (DSF data with .dff URL - already LSB)" << std::endl;
-        m_resamplingLogged = true;
-      }    
-    }
-        return (totalBytesRead * 8) / m_trackInfo.channels;
-    }
-
-    // ══════════════════════════════════════════════════════════════
-    // PCM MODE - Normal decoding with resampling
-    // ══════════════════════════════════════════════════════════════
-    
-    if (!m_codecContext || m_eof) {
-        return 0;
-    }
-    
-    // Initialize resampler if needed (not for DSD)
-    if (!m_trackInfo.isDSD && !m_swrContext) {
-        if (!initResampler(outputRate, outputBits)) {
-            return 0;
-        }
-    }
-    
-    size_t totalSamplesRead = 0;
-    // ✅ CRITICAL FIX: 24-bit uses S32 container (4 bytes), not 3!
-size_t bytesPerSample;
-if (m_trackInfo.isDSD) {
-    bytesPerSample = 1;
-} else {
-    // For PCM: 16-bit = 2 bytes, 24-bit and 32-bit = 4 bytes
-    bytesPerSample = (outputBits == 16) ? 2 : 4;
-    bytesPerSample *= m_trackInfo.channels;
-}
-    
-    // Ensure buffer is large enough
-    if (buffer.size() < numSamples * bytesPerSample) {
-        buffer.resize(numSamples * bytesPerSample);
-    }
-    
-    uint8_t* outputPtr = buffer.data();
-    
-    // CRITICAL FIX: D'abord, utiliser les samples restants du buffer interne
-    if (m_remainingCount > 0) {
-        size_t samplesToUse = std::min(m_remainingCount, numSamples);
-        memcpy(outputPtr, m_remainingSamples.data(), samplesToUse * bytesPerSample);
-        outputPtr += samplesToUse * bytesPerSample;
-        totalSamplesRead += samplesToUse;
-        
-        // S'il reste encore des samples dans le buffer interne, les décaler
-        if (samplesToUse < m_remainingCount) {
-            size_t remaining = m_remainingCount - samplesToUse;
-            memmove(m_remainingSamples.data(), 
-                    m_remainingSamples.data() + samplesToUse * bytesPerSample,
-                    remaining * bytesPerSample);
-            m_remainingCount = remaining;
+        if (drain_waited_ms >= drain_timeout_ms) {
+            size_t remainingBuffered = m_syncBuffer->getLastBufferCount();
+            std::cerr << "[DirettaOutput]    ⚠️  DRAIN TIMEOUT! " << remainingBuffered 
+                      << " samples still buffered after " << drain_timeout_ms << "ms" << std::endl;
+            std::cerr << "[DirettaOutput]    Forcing immediate disconnect..." << std::endl;
+            // Force immediate disconnect to avoid pink noise
+            m_syncBuffer->pre_disconnect(true);
         } else {
-            m_remainingCount = 0;
+            std::cout << "[DirettaOutput]    ✓ Buffer drained in " << drain_waited_ms << "ms" << std::endl;
+            
+            // ⭐ STEP 3: GRACEFUL DISCONNECT
+            std::cout << "[DirettaOutput] 3. Graceful disconnect..." << std::endl;
+            m_syncBuffer->pre_disconnect(false);
         }
         
-        // Si on a déjà assez de samples, retourner maintenant
-        if (totalSamplesRead >= numSamples) {
-            return totalSamplesRead;
-        }
-    }
-    
-    AVPacket* packet = av_packet_alloc();
-    AVFrame* frame = av_frame_alloc();
-    
-    if (!packet || !frame) {
-        if (packet) av_packet_free(&packet);
-        if (frame) av_frame_free(&frame);
-        return totalSamplesRead; // Retourner ce qu'on a déjà lu du buffer
-    }
-    
-    while (totalSamplesRead < numSamples && !m_eof) {
-        // Read packet
-        int ret = av_read_frame(m_formatContext, packet);
+        // ⭐ STEP 4: WAIT FOR HARDWARE STABILIZATION
+        std::cout << "[DirettaOutput] 4. Waiting for hardware stabilization (200ms)..." << std::endl;
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
         
-        if (ret < 0) {
-            // Log position when EOF occurs
-            if (m_formatContext->pb && m_formatContext->pb->pos > 0) {
-                std::cout << "[AudioDecoder] Bytes read from stream: " << m_formatContext->pb->pos << std::endl;
+        // ⭐ STEP 5: DESTROY SYNCBUFFER (force recreation in configureDiretta)
+        // After pre_disconnect(), SyncBuffer cannot be reused for a different format
+        std::cout << "[DirettaOutput] 5. Destroying SyncBuffer for clean recreation..." << std::endl;
+        m_syncBuffer.reset();
+    }
+
+    // ⭐ STEP 6: RECONFIGURE WITH NEW FORMAT
+    std::cout << "[DirettaOutput] 6. Configuring new format..." << std::endl;
+    if (!configureDiretta(newFormat)) {
+        std::cerr << "[DirettaOutput] ❌ Failed to reconfigure" << std::endl;
+        return false;
+    }
+    
+    // ⭐ STEP 7: RESTART PLAYBACK IF NEEDED
+    if (m_playing) {
+        std::cout << "[DirettaOutput] 7. Restarting playback..." << std::endl;
+        m_syncBuffer->play();
+        
+        // Wait for DAC to lock onto new format
+        std::cout << "[DirettaOutput]    Waiting for DAC lock (200ms)..." << std::endl;
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    
+    m_currentFormat = newFormat;
+    m_totalSamplesSent = 0;  // Reset counter for new format
+    
+    std::cout << "[DirettaOutput] ✅ Format changed successfully" << std::endl;
+    
+    return true;
+}
+bool DirettaOutput::sendAudio(const uint8_t* data, size_t numSamples) {
+    if (!m_connected || !m_playing) {
+        return false;
+    }
+    
+    if (!m_syncBuffer) {
+        return false;
+    }
+    
+    // CRITICAL: Different calculation for DSD vs PCM
+    size_t dataSize;
+    
+    if (m_currentFormat.isDSD) {
+        // For DSD: numSamples is already in audio frames (not bits)
+        // DSD64 stereo: 1 audio frame = 2 channels × 1 bit = 2 bits = 0.25 bytes
+        // But AudioEngine gives us samples in terms of bits per channel
+        // So: numSamples = bits per channel, dataSize = total bytes
+        //
+        // Example: 32768 samples = 32768 bits per channel
+        //          For stereo: 32768 bits × 2 channels = 65536 bits = 8192 bytes
+        dataSize = (numSamples * m_currentFormat.channels) / 8;
+        
+        static int debugCount = 0;
+        if (debugCount++ < 3) {
+            DEBUG_LOG("[DirettaOutput::sendAudio] DSD: " << numSamples 
+                      << " samples → " << dataSize << " bytes");
+        }
+    } else {
+        // ✅ PCM: Calculate based on ACTUAL format (not what we'll send)
+        // For 24-bit: input is S32 (4 bytes), output will be S24 (3 bytes)
+        uint32_t inputBytesPerSample = (m_currentFormat.bitDepth == 24) ? 4 : (m_currentFormat.bitDepth / 8);
+        inputBytesPerSample *= m_currentFormat.channels;
+        
+        // Output size (what we'll actually send to Diretta)
+        uint32_t outputBytesPerSample = (m_currentFormat.bitDepth / 8) * m_currentFormat.channels;
+        dataSize = numSamples * outputBytesPerSample;
+    }
+    
+    DIRETTA::Stream stream;
+    stream.resize(dataSize);
+    
+// ✅ CRITICAL FIX: Convert S32 → S24 if needed
+if (!m_currentFormat.isDSD && m_currentFormat.bitDepth == 24) {
+    // Input: S32 (4 bytes per sample)
+    // Output: S24 (3 bytes per sample)
+    const int32_t* input32 = reinterpret_cast<const int32_t*>(data);
+    uint8_t* output24 = stream.get();
+    
+    size_t totalSamples = numSamples * m_currentFormat.channels;
+    
+    for (size_t i = 0; i < totalSamples; i++) {
+        int32_t sample32 = input32[i];
+        
+        // Extract 24-bit from 32-bit (MSB aligned)
+        // Little-endian byte order for S24LE
+        output24[i*3 + 0] = (sample32 >> 8) & 0xFF;   // LSB
+        output24[i*3 + 1] = (sample32 >> 16) & 0xFF;  // Mid
+        output24[i*3 + 2] = (sample32 >> 24) & 0xFF;  // MSB
+    }
+    
+    static int convCount = 0;
+    if (convCount++ < 3 || convCount % 100 == 0) {
+        DEBUG_LOG("[sendAudio] S32→S24: " << numSamples << " samples, " 
+                  << totalSamples << " total, " << dataSize << " bytes");
+    }
+    } else {
+        // For other formats (16-bit, 32-bit, DSD): direct copy
+        memcpy(stream.get(), data, dataSize);
+    }
+    m_syncBuffer->setStream(stream);
+    m_totalSamplesSent += numSamples;
+
+    static int callCount = 0;
+    if (++callCount % 500 == 0) {
+        double seconds = static_cast<double>(m_totalSamplesSent) / m_currentFormat.sampleRate;
+        DEBUG_LOG("[DirettaOutput] Position: " << seconds << "s (" 
+                  << m_totalSamplesSent << " samples)");
+    }
+
+        
+    return true;
+}
+
+float DirettaOutput::getBufferLevel() const {
+    return 0.5f;
+}
+
+bool DirettaOutput::findTarget() {
+    m_udp = std::make_unique<ACQUA::UDPV6>();
+    m_raw = std::make_unique<ACQUA::UDPV6>();
+    
+    DIRETTA::Find::Setting findSetting;
+    findSetting.Loopback = false;
+    findSetting.ProductID = 0;
+    
+    DIRETTA::Find find(findSetting);
+    
+    if (!find.open()) {
+        std::cerr << "[DirettaOutput] ❌ Failed to open Find" << std::endl;
+        return false;
+    }
+    
+    DIRETTA::Find::PortResalts targets;
+    if (!find.findOutput(targets)) {
+        std::cerr << "[DirettaOutput] ❌ Failed to find outputs" << std::endl;
+        return false;
+    }
+    
+    if (targets.empty()) {
+        std::cerr << "[DirettaOutput] ❌ No Diretta targets found" << std::endl;
+        return false;
+    }
+    
+    std::cout << "[DirettaOutput] ✓ Found " << targets.size() << " target(s)" << std::endl;
+    
+    m_targetAddress = targets.begin()->first;
+    
+// ⭐ TOUJOURS mesurer le MTU physique
+    uint32_t measuredMTU = 1500;
+    if (find.measSendMTU(m_targetAddress, measuredMTU)) {
+        DEBUG_LOG("[DirettaOutput] 📊 Physical MTU measured: " << measuredMTU << " bytes");
+    } else {
+        std::cerr << "[DirettaOutput] ⚠️  Failed to measure MTU" << std::endl;
+    }
+    
+    m_mtu = measuredMTU;  // Utiliser le MTU mesuré
+    std::cout << "[DirettaOutput] ✓ MTU: " << m_mtu << " bytes" << std::endl;
+
+    return true;
+}
+
+bool DirettaOutput::findAndSelectTarget(int targetIndex) {
+    m_udp = std::make_unique<ACQUA::UDPV6>();
+    m_raw = std::make_unique<ACQUA::UDPV6>();
+    
+    DIRETTA::Find::Setting findSetting;
+    findSetting.Loopback = false;
+    findSetting.ProductID = 0;
+    
+    DIRETTA::Find find(findSetting);
+    
+    if (!find.open()) {
+        std::cerr << "[DirettaOutput] ❌ Failed to open Find" << std::endl;
+        return false;
+    }
+    
+    DIRETTA::Find::PortResalts targets;
+    if (!find.findOutput(targets)) {
+        std::cerr << "[DirettaOutput] ❌ Failed to find outputs" << std::endl;
+        return false;
+    }
+    
+    if (targets.empty()) {
+        std::cerr << "[DirettaOutput] ❌ No Diretta targets found" << std::endl;
+        std::cerr << "[DirettaOutput] Please check:" << std::endl;
+        std::cerr << "[DirettaOutput]   1. Diretta Target is powered on" << std::endl;
+        std::cerr << "[DirettaOutput]   2. Target is connected to the same network" << std::endl;
+        std::cerr << "[DirettaOutput]   3. Network firewall allows Diretta protocol" << std::endl;
+        return false;
+    }
+    
+    std::cout << "[DirettaOutput] ✓ Found " << targets.size() << " target(s)" << std::endl;
+    std::cout << std::endl;
+    
+    // If only one target, use it automatically
+    if (targets.size() == 1) {
+        m_targetAddress = targets.begin()->first;
+        DEBUG_LOG("[DirettaOutput] ✓ Auto-selected only available target");
+    }
+    // Multiple targets: interactive selection
+    else {
+        std::cout << "══════════════════════════════════════════════════════" << std::endl;
+        std::cout << "  📡 Multiple Diretta Targets Detected" << std::endl;
+        std::cout << "══════════════════════════════════════════════════════" << std::endl;
+        std::cout << std::endl;
+        
+        // List all targets with index
+        int index = 1;
+        std::vector<ACQUA::IPAddress> targetList;
+        
+        for (const auto& target : targets) {
+            targetList.push_back(target.first);
+            
+            std::cout << "[" << index << "] Target #" << index << std::endl;
+            std::cout << "    Address: " << target.first.get_str() << std::endl;
+            std::cout << std::endl;
+            index++;
+        }
+        
+        std::cout << "══════════════════════════════════════════════════════" << std::endl;
+        
+        int selection = 0;
+        
+        // If targetIndex provided (from command line), use it
+        if (targetIndex >= 0 && targetIndex < static_cast<int>(targetList.size())) {
+            selection = targetIndex;
+            std::cout << "Using target #" << (selection + 1) << " (from command line)" << std::endl;
+        } else {
+            // Interactive selection
+            std::cout << "\nPlease select a target (1-" << targetList.size() << "): ";
+            std::cout.flush();
+            
+            std::string input;
+            std::getline(std::cin, input);
+            
+            try {
+                selection = std::stoi(input) - 1;  // Convert to 0-based index
+                
+                if (selection < 0 || selection >= static_cast<int>(targetList.size())) {
+                    std::cerr << "[DirettaOutput] ❌ Invalid selection: " << (selection + 1) << std::endl;
+                    std::cerr << "[DirettaOutput] Please select a number between 1 and " << targetList.size() << std::endl;
+                    return false;
+                }
+            } catch (...) {
+                std::cerr << "[DirettaOutput] ❌ Invalid input. Please enter a number." << std::endl;
+                return false;
+            }
+        }
+        
+        m_targetAddress = targetList[selection];
+        std::cout << "\n[DirettaOutput] ✓ Selected target #" << (selection + 1) << ": " 
+                  << m_targetAddress.get_str() << std::endl;
+        std::cout << std::endl;
+    }
+    
+    // Measure MTU for selected target
+    uint32_t measuredMTU = 1500;
+    DEBUG_LOG("[DirettaOutput] Measuring network MTU...");
+    
+    if (find.measSendMTU(m_targetAddress, measuredMTU)) {
+        DEBUG_LOG("[DirettaOutput] 📊 Physical MTU measured: " << measuredMTU << " bytes");
+        
+        if (measuredMTU >= 9000) {
+            std::cout << " (Jumbo frames enabled! ✓)";
+        } else if (measuredMTU > 1500) {
+            std::cout << " (Extended frames)";
+        } else {
+            std::cout << " (Standard Ethernet)";
+        }
+        std::cout << std::endl;
+    } else {
+        std::cerr << "[DirettaOutput] ⚠️  Failed to measure MTU, using default: " 
+                  << measuredMTU << " bytes" << std::endl;
+    }
+    
+    m_mtu = measuredMTU;
+    DEBUG_LOG("[DirettaOutput] ✓ MTU configured: " << m_mtu << " bytes");
+    std::cout << std::endl;
+
+    return true;
+}
+
+void DirettaOutput::listAvailableTargets() {
+    DIRETTA::Find::Setting findSetting;
+    findSetting.Loopback = false;
+    findSetting.ProductID = 0;
+    
+    DIRETTA::Find find(findSetting);
+    
+    std::cout << "Opening Diretta Find..." << std::endl;
+    if (!find.open()) {
+        std::cerr << "Failed to initialize Diretta Find" << std::endl;
+        std::cerr << "Make sure you run this with sudo/root privileges" << std::endl;
+        return;
+    }
+    
+    std::cout << "Scanning network for Diretta targets (waiting 3 seconds)..." << std::endl;
+    DIRETTA::Find::PortResalts targets;
+    if (!find.findOutput(targets)) {
+        std::cerr << "Failed to scan for targets (findOutput returned false)" << std::endl;
+        return;
+    }
+    
+    if (targets.empty()) {
+        std::cout << "No Diretta targets found on the network." << std::endl;
+        return;
+    }
+    
+    std::cout << "\n══════════════════════════════════════════════════════" << std::endl;
+    std::cout << "  Available Diretta Targets (" << targets.size() << " found)" << std::endl;
+    std::cout << "══════════════════════════════════════════════════════" << std::endl;
+    
+    int index = 1;
+    for (const auto& target : targets) {
+        std::cout << "\n[" << index << "] Target #" << index << std::endl;
+        std::cout << "    IP Address: " << target.first.get_str() << std::endl;
+        
+        // Try to measure MTU for this target
+        uint32_t mtu = 1500;
+        if (find.measSendMTU(target.first, mtu)) {
+            std::cout << "    MTU: " << mtu << " bytes";
+            if (mtu >= 9000) {
+                std::cout << " (Jumbo frames)";
+            }
+            std::cout << std::endl;
+        }
+        
+        // Friendly device info from Diretta SDK
+        const auto& info = target.second;
+        if (!info.targetName.empty()) {
+            std::cout << "    Device: " << info.targetName << std::endl;
+        }
+        if (!info.outputName.empty()) {
+            std::cout << "    Output: " << info.outputName << std::endl;
+        }
+        if (!info.config.empty()) {
+            std::cout << "    Config: " << info.config << std::endl;
+        }
+        if (info.productID != 0) {
+            std::cout << "    ProductID: 0x" << std::hex << info.productID << std::dec << std::endl;
+        }
+        if (info.version != 0) {
+            std::cout << "    Protocol: v" << info.version << std::endl;
+        }
+        if (info.multiport) {
+            std::cout << "    Multiport: enabled" << std::endl;
+        }
+        if (info.Sync.isEnable()) {
+            std::cout << "    Sync: hash=" << info.Sync.Hash
+                      << " total=" << info.Sync.Total
+                      << " all=" << info.Sync.All
+                      << " self=" << info.Sync.Self << std::endl;
+        }
+        
+        index++;
+    }
+    
+    std::cout << "\n══════════════════════════════════════════════════════" << std::endl;
+}
+
+bool DirettaOutput::verifyTargetAvailable() {
+    const int MAX_RETRIES = 3;
+    const int RETRY_DELAY_SECONDS = 5;
+    
+    std::cout << "[DirettaOutput] " << std::endl;
+    DEBUG_LOG("[DirettaOutput] Scanning for Diretta targets...");
+    DEBUG_LOG("[DirettaOutput] This may take several seconds per attempt");
+    std::cout << "[DirettaOutput] " << std::endl;
+    
+    DIRETTA::Find::Setting findSetting;
+    findSetting.Loopback = false;
+    findSetting.ProductID = 0;
+    
+    for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        if (attempt > 1) {
+            std::cout << "[DirettaOutput] " << std::endl;
+            std::cout << "[DirettaOutput] 🔄 Retry " << attempt << "/" << MAX_RETRIES << "..." << std::endl;
+        }
+        
+        // Create new Find object for each attempt (important!)
+        DIRETTA::Find find(findSetting);
+        
+        DEBUG_LOG("[DirettaOutput] Opening Diretta Find on all network interfaces");
+        std::cout.flush();
+        
+        if (!find.open()) {
+            std::cerr << " ❌" << std::endl;
+            std::cerr << "[DirettaOutput] Failed to initialize Diretta Find" << std::endl;
+            
+            if (attempt >= MAX_RETRIES) {
+                std::cerr << "[DirettaOutput] " << std::endl;
+                std::cerr << "[DirettaOutput] This usually means:" << std::endl;
+                std::cerr << "[DirettaOutput]   1. Insufficient permissions (need root/sudo)" << std::endl;
+                std::cerr << "[DirettaOutput]   2. Network interface is down" << std::endl;
+                std::cerr << "[DirettaOutput]   3. Firewall blocking UDP multicast" << std::endl;
+                return false;
             }
             
-            if (ret == AVERROR_EOF) {
-                m_eof = true;
-                DEBUG_LOG("[AudioDecoder] EOF reached");
-                
-                // Check if we read the expected duration
-                std::cout << "[AudioDecoder] Samples decoded: " << totalSamplesRead << std::endl;
-            } else if (ret == AVERROR(ETIMEDOUT)) {
-                std::cerr << "[AudioDecoder] ⚠️  Timeout - connection too slow or lost" << std::endl;
-                m_eof = true;
-            } else if (ret == AVERROR(ECONNRESET)) {
-                std::cerr << "[AudioDecoder] ⚠️  Connection reset by server" << std::endl;
-                m_eof = true;
-            } else if (ret == AVERROR_EXIT) {
-                std::cerr << "[AudioDecoder] ⚠️  Exit requested" << std::endl;
-                m_eof = true;
-            } else {
-                char errbuf[AV_ERROR_MAX_STRING_SIZE];
-                av_strerror(ret, errbuf, sizeof(errbuf));
-                std::cerr << "[AudioDecoder] ⚠️  Read error (" << ret << "): " << errbuf << std::endl;
-                m_eof = true;
-            }
-            break;
-        }
-        
-        // Skip non-audio packets
-        if (packet->stream_index != m_audioStreamIndex) {
-            av_packet_unref(packet);
+            std::this_thread::sleep_for(std::chrono::seconds(RETRY_DELAY_SECONDS));
             continue;
         }
         
-        // Send packet to decoder
-        ret = avcodec_send_packet(m_codecContext, packet);
-        av_packet_unref(packet);
+        std::cout << " ✓" << std::endl;
+        DEBUG_LOG("[DirettaOutput] Scanning network";
+        std::cout.flush());
         
-        if (ret < 0) {
-            std::cerr << "[AudioDecoder] Error sending packet to decoder" << std::endl;
-            break;
-        }
+        // Visual feedback during scan (SDK blocks here)
+        auto scanStart = std::chrono::steady_clock::now();
         
-        // Receive decoded frames
-        while (ret >= 0 && totalSamplesRead < numSamples) {
-            ret = avcodec_receive_frame(m_codecContext, frame);
+        DIRETTA::Find::PortResalts targets;
+        bool scanSuccess = find.findOutput(targets);
+        
+        auto scanEnd = std::chrono::steady_clock::now();
+        auto scanDuration = std::chrono::duration_cast<std::chrono::milliseconds>(scanEnd - scanStart);
+        
+        std::cout << " (took " << scanDuration.count() << "ms)";
+        
+        if (!scanSuccess) {
+            std::cout << " ⚠️" << std::endl;
+            std::cerr << "[DirettaOutput] findOutput() returned false" << std::endl;
             
-            if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
-                break;
-            } else if (ret < 0) {
-                std::cerr << "[AudioDecoder] Error receiving frame from decoder" << std::endl;
-                av_frame_unref(frame);
-                av_packet_free(&packet);
-                av_frame_free(&frame);
-                return totalSamplesRead;
+            if (attempt >= MAX_RETRIES) {
+                std::cerr << "[DirettaOutput] " << std::endl;
+                std::cerr << "[DirettaOutput] This could mean:" << std::endl;
+                std::cerr << "[DirettaOutput]   1. No response from any targets (timeout)" << std::endl;
+                std::cerr << "[DirettaOutput]   2. Targets are on a different subnet" << std::endl;
+                std::cerr << "[DirettaOutput]   3. Network discovery is blocked" << std::endl;
+                return false;
             }
             
-            // Process frame
-            size_t frameSamples = frame->nb_samples;
+            std::cout << "[DirettaOutput] No response, retrying..." << std::endl;
+            std::this_thread::sleep_for(std::chrono::seconds(RETRY_DELAY_SECONDS));
+            continue;
+        }
+        
+        if (targets.empty()) {
+            std::cout << " ⚠️" << std::endl;
+            std::cerr << "[DirettaOutput] Scan succeeded but no targets found" << std::endl;
             
-            if (m_trackInfo.isDSD) {
-                // DSD: Direct copy (no resampling!)
-                size_t bytesToCopy = frameSamples * m_trackInfo.channels;
-                size_t remainingSpace = (numSamples - totalSamplesRead) * bytesPerSample;
-                
-                if (bytesToCopy > remainingSpace) {
-                    bytesToCopy = remainingSpace;
-                    frameSamples = bytesToCopy / m_trackInfo.channels;
-                }
-                
-                // Copy DSD data
-                if (frame->format == AV_SAMPLE_FMT_U8) {
-                    memcpy(outputPtr, frame->data[0], bytesToCopy);
-                } else if (frame->format == AV_SAMPLE_FMT_U8P) {
-                    // Planar to interleaved
-                    for (size_t i = 0; i < frameSamples; i++) {
-                        for (uint32_t ch = 0; ch < m_trackInfo.channels; ch++) {
-                            *outputPtr++ = frame->data[ch][i];
-                        }
-                    }
-                    outputPtr -= bytesToCopy; // Reset pointer after increment
-                }
-                
-                outputPtr += bytesToCopy;
-                totalSamplesRead += frameSamples;
-                
-            } else {
-                // PCM: Resample if needed
-                size_t samplesNeeded = numSamples - totalSamplesRead;
-                
-                if (m_swrContext) {
-                    // Calculate TOTAL output samples (without limiting)
-                    int64_t totalOutSamples = av_rescale_rnd(
-                        swr_get_delay(m_swrContext, m_codecContext->sample_rate) + frameSamples,
-                        outputRate,
-                        m_codecContext->sample_rate,
-                        AV_ROUND_UP
-                    );
-                    
-                    // CRITICAL FIX: Allouer un buffer temporaire pour TOUS les samples convertis
-                    size_t tempBufferSize = totalOutSamples * bytesPerSample;
-                    AudioBuffer tempBuffer(tempBufferSize);
-                    uint8_t* tempPtr = tempBuffer.data();
-                    
-                    // Convertir TOUTE la frame
-                    int convertedSamples = swr_convert(
-                        m_swrContext,
-                        &tempPtr,
-                        totalOutSamples,
-                        (const uint8_t**)frame->data,
-                        frameSamples
-                    );
-                    
-                    if (convertedSamples > 0) {
-                        // Déterminer combien on peut utiliser maintenant
-                        size_t samplesToUse = std::min((size_t)convertedSamples, samplesNeeded);
-                        size_t bytesToUse = samplesToUse * bytesPerSample;
-                        
-                        // Copier vers le buffer de sortie
-                        memcpy(outputPtr, tempBuffer.data(), bytesToUse);
-                        outputPtr += bytesToUse;
-                        totalSamplesRead += samplesToUse;
-                        
-                        // CRITICAL: S'il reste des samples, les stocker dans le buffer interne
-                        if ((size_t)convertedSamples > samplesToUse) {
-                            size_t excess = convertedSamples - samplesToUse;
-                            size_t excessBytes = excess * bytesPerSample;
-                            
-                            // Redimensionner le buffer interne si nécessaire
-                            if (m_remainingSamples.size() < excessBytes) {
-                                m_remainingSamples.resize(excessBytes);
-                            }
-                            
-                            // Copier l'excédent
-                            memcpy(m_remainingSamples.data(), 
-                                   tempBuffer.data() + bytesToUse,
-                                   excessBytes);
-                            m_remainingCount = excess;
-                        
-                            if (!m_resamplerInitLogged) {
-                                std::cout << "[AudioDecoder] ✅ Buffering " << excess 
-                                          << " excess samples for next read" << std::endl;
-                                m_resamplerInitLogged = true;
-                            }
-                        }
-                    }
-                } else {
-                    // No resampling - direct copy
-                    size_t samplesToCopy = std::min(frameSamples, samplesNeeded);
-                    size_t bytesToCopy = samplesToCopy * bytesPerSample;
-                    
-                    memcpy(outputPtr, frame->data[0], bytesToCopy);
-                    outputPtr += bytesToCopy;
-                    totalSamplesRead += samplesToCopy;
-                    
-                    // CRITICAL: S'il reste des samples dans la frame, les stocker
-                    if (frameSamples > samplesToCopy) {
-                        size_t excess = frameSamples - samplesToCopy;
-                        size_t excessBytes = excess * bytesPerSample;
-                        
-                        if (m_remainingSamples.size() < excessBytes) {
-                            m_remainingSamples.resize(excessBytes);
-                        }
-                        
-                        memcpy(m_remainingSamples.data(),
-                               frame->data[0] + bytesToCopy,
-                               excessBytes);
-                        m_remainingCount = excess;
-                        
-                        std::cout << "[AudioDecoder] ✅ Buffering " << excess 
-                                  << " excess samples (no resampling)" << std::endl;
-                    }
-                }
+            if (attempt >= MAX_RETRIES) {
+                std::cerr << "[DirettaOutput] " << std::endl;
+                std::cerr << "[DirettaOutput] ❌ No Diretta targets found after " 
+                          << MAX_RETRIES << " attempts" << std::endl;
+                std::cerr << "[DirettaOutput] Please ensure:" << std::endl;
+                std::cerr << "[DirettaOutput]   1. Diretta Target is powered on and running" << std::endl;
+                std::cerr << "[DirettaOutput]   2. Target is on the same network/VLAN" << std::endl;
+                std::cerr << "[DirettaOutput]   3. Network allows multicast/broadcast" << std::endl;
+                return false;
             }
             
-            av_frame_unref(frame);
+            std::cout << "[DirettaOutput] Target may still be initializing, retrying..." << std::endl;
+            std::this_thread::sleep_for(std::chrono::seconds(RETRY_DELAY_SECONDS));
+            continue;
         }
-    }
-    
-    av_packet_free(&packet);
-    av_frame_free(&frame);
-    
-    return totalSamplesRead;
-}
-
-bool AudioDecoder::initResampler(uint32_t outputRate, uint32_t outputBits) {
-    // Don't resample DSD!
-    if (m_trackInfo.isDSD) {
-        std::cout << "[AudioDecoder] DSD: No resampling, native passthrough" << std::endl;
+        
+        // SUCCESS!
+        std::cout << " ✓" << std::endl;
+        std::cout << "[DirettaOutput] " << std::endl;
+        DEBUG_LOG("[DirettaOutput] ✅ Found " << targets.size() << " Diretta target(s)");
+        if (attempt > 1) {
+            std::cout << " (after " << attempt << " attempt(s))";
+        }
+        std::cout << std::endl;
+        std::cout << "[DirettaOutput] " << std::endl;
+        
+        // ⭐ CORRECTION: Itérer sur la map avec un itérateur
+        int targetNum = 1;
+        for (const auto& targetPair : targets) {
+            const auto& targetInfo = targetPair.second;
+            DEBUG_LOG("[DirettaOutput] Target #" << targetNum << ": " 
+          << targetInfo.targetName);
+            targetNum++;
+        }
+        std::cout << "[DirettaOutput] " << std::endl;
+        
+        // If specific target index is requested, verify it's in range
+        if (m_targetIndex >= 0) {
+            if (m_targetIndex >= static_cast<int>(targets.size())) {
+                std::cerr << "[DirettaOutput] ❌ Target index " << (m_targetIndex + 1) 
+                          << " is out of range (only " << targets.size() << " target(s) found)" << std::endl;
+                std::cerr << "[DirettaOutput] Please run --list-targets to see available targets" << std::endl;
+                return false;
+            }
+            
+            // ⭐ CORRECTION: Trouver la target à l'index demandé
+            auto it = targets.begin();
+            std::advance(it, m_targetIndex);
+            const auto& targetInfo = it->second;
+            
+            DEBUG_LOG("[DirettaOutput] ✓ Will use target #" << (m_targetIndex + 1) 
+          << " (" << targetInfo.targetName << ")" );
+            std::cout << "[DirettaOutput] " << std::endl;
+        } else if (targets.size() > 1) {
+            std::cout << "[DirettaOutput] 💡 Multiple targets detected. Interactive selection will be used." << std::endl;
+            std::cout << "[DirettaOutput] " << std::endl;
+        }
+        
         return true;
     }
     
-    // Free existing resampler
-    if (m_swrContext) {
-        swr_free(&m_swrContext);
-    }
-    
-    // Determine output format
-    AVSampleFormat outFormat;
-    switch (outputBits) {
-        case 16:
-            outFormat = AV_SAMPLE_FMT_S16;
-            break;
-        case 24:
-        case 32:
-            outFormat = AV_SAMPLE_FMT_S32;
-            break;
-        default:
-            outFormat = AV_SAMPLE_FMT_S32;
-            break;
-    }
-    
-    // Allocate resampler with new API
-    AVChannelLayout inLayout, outLayout;
-    av_channel_layout_default(&inLayout, m_codecContext->ch_layout.nb_channels);
-    av_channel_layout_default(&outLayout, m_codecContext->ch_layout.nb_channels);
-    
-    int ret = swr_alloc_set_opts2(
-        &m_swrContext,
-        &outLayout,
-        outFormat,
-        outputRate,
-        &inLayout,
-        m_codecContext->sample_fmt,
-        m_codecContext->sample_rate,
-        0,
-        nullptr
-    );
-    
-    if (ret < 0 || !m_swrContext) {
-        std::cerr << "[AudioDecoder] Failed to allocate resampler" << std::endl;
-        return false;
-    }
-    
-    // Initialize resampler
-    if (swr_init(m_swrContext) < 0) {
-        std::cerr << "[AudioDecoder] Failed to initialize resampler" << std::endl;
-        swr_free(&m_swrContext);
-        return false;
-    }
-    
-    std::cout << "[AudioDecoder] Resampler: " << m_codecContext->sample_rate 
-              << "Hz → " << outputRate << "Hz, " << outputBits << "bit" << std::endl;
-    
-    return true;
+    // Should never reach here (all retry paths return above)
+    return false;
 }
 
-// ============================================================================
-// AudioEngine
-// ============================================================================
-
-AudioEngine::AudioEngine()
-    : m_state(State::STOPPED)
-    , m_trackNumber(1)
-    , m_samplesPlayed(0)
-    , m_silenceCount(0)
-    , m_isDraining(false)
-{
-    std::cout << "[AudioEngine] Created" << std::endl;
-}
-
-AudioEngine::~AudioEngine() {
-    stop();
-    waitForPreloadThread();
-}
-
-void AudioEngine::waitForPreloadThread() {
-    if (m_preloadThread.joinable()) {
-        m_preloadThread.join();
+bool DirettaOutput::configureDiretta(const AudioFormat& format) {
+    DEBUG_LOG("[DirettaOutput] Configuring SyncBuffer...");
+    
+    if (!m_syncBuffer) {
+        DEBUG_LOG("[DirettaOutput] Creating SyncBuffer...");
+        m_syncBuffer = std::make_unique<DIRETTA::SyncBuffer>();
     }
+  
+    // ===== BUILD FORMAT =====
+    DIRETTA::FormatID formatID;
+    
+    // CRITICAL: DSD FORMAT
+    if (format.isDSD) {
+        DEBUG_LOG("[DirettaOutput] 🎵 DSD NATIVE MODE");
+        
+        // ✅ Base DSD format - always use FMT_DSD1 and FMT_DSD_SIZ_32
+        formatID = DIRETTA::FormatID::FMT_DSD1 | DIRETTA::FormatID::FMT_DSD_SIZ_32;
+        
+        // ✅ CRITICAL FIX: Detect DSF vs DFF format correctly
+formatID |= DIRETTA::FormatID::FMT_DSD_LSB;
+formatID |= DIRETTA::FormatID::FMT_DSD_LITTLE;
+
+if (format.dsdFormat == AudioFormat::DSDFormat::DFF) {
+    DEBUG_LOG("[DirettaOutput]    Format: DSF (LSB + LITTLE) [converted from DFF]");
+} else {
+    DEBUG_LOG("[DirettaOutput]    Format: DSF (LSB + LITTLE)");
 }
-
-void AudioEngine::setAudioCallback(const AudioCallback& callback) {
-    m_audioCallback = callback;
-}
-
-void AudioEngine::setTrackChangeCallback(const TrackChangeCallback& callback) {
-    m_trackChangeCallback = callback;
-}
-
-void AudioEngine::setCurrentURI(const std::string& uri, const std::string& metadata, bool forceReopen) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    
-    // CRITICAL: Si on change d'URI pendant la lecture, fermer les décodeurs
-    // pour forcer l'ouverture de la nouvelle piste
-    bool uriChanged = (uri != m_currentURI);
-    
-    m_currentURI = uri;
-    m_currentMetadata = metadata;
-    
-    // ⭐ NOUVEAU : Forcer la réouverture même si l'URI est la même (pour Stop)
-    if (uriChanged || forceReopen) {
-        std::cout << "[AudioEngine] ⚠️  " 
-                  << (forceReopen ? "Forced reopen" : "URI changed") 
-                  << " - closing decoders to load new track" << std::endl;
         
-        // Fermer les décodeurs pour forcer réouverture
-        m_currentDecoder.reset();
-        m_nextDecoder.reset();
+        DEBUG_LOG("[DirettaOutput]    Word size: 32-bit container");
+        DEBUG_LOG("[DirettaOutput]    DSD Rate: ");
         
-        // ⭐⭐⭐ CRITICAL FIX: Clear gapless queue when changing URI
-        // Otherwise, the old "next track" will play after the new track finishes!
-        {
-            std::lock_guard<std::mutex> pendingLock(m_pendingMutex);
-            m_pendingNextURI.clear();
-            m_pendingNextMetadata.clear();
-            m_pendingNextTrack.store(false, std::memory_order_release);
-        }
-        m_nextURI.clear();
-        m_nextMetadata.clear();
-        
-        std::cout << "[AudioEngine] ✓ Gapless queue cleared" << std::endl;
-        
-        // Réinitialiser la position
-        m_samplesPlayed = 0;
-        m_silenceCount = 0;
-        m_isDraining = false;
-        
-        // Arrêter le préchargement en cours si existant
-        if (m_preloadRunning.load(std::memory_order_acquire)) {
-            m_preloadRunning.store(false, std::memory_order_release);
-            std::cout << "[AudioEngine] ⚠️  Cancelling ongoing preload" << std::endl;
-        }
-        
-        // Si on est en PLAYING, on va automatiquement ouvrir la nouvelle piste
-        // au prochain process()
-    }
-    
-    std::cout << "[AudioEngine] Current URI set" << std::endl;
-}
-void AudioEngine::setNextURI(const std::string& uri, const std::string& metadata) {
-    // Thread-safe: Use pending mechanism to defer to audio thread
-    {
-        std::lock_guard<std::mutex> pendingLock(m_pendingMutex);
-        m_pendingNextURI = uri;
-        m_pendingNextMetadata = metadata;
-    }
-    m_pendingNextTrack.store(true, std::memory_order_release);
-    std::cout << "[AudioEngine] Next URI queued (gapless)" << std::endl;
-}
-
-void AudioEngine::setTrackEndCallback(const TrackEndCallback& callback) {
-    m_trackEndCallback = callback;
-}
-
-bool AudioEngine::play() {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    
-    if (m_currentURI.empty()) {
-        std::cerr << "[AudioEngine] No URI set" << std::endl;
-        return false;
-    }
-    
-    // If paused, just resume
-    if (m_state == State::PAUSED && m_currentDecoder) {
-        std::cout << "[AudioEngine] Resume" << std::endl;
-        m_state = State::PLAYING;
-        return true;
-    }
-    
-    std::cout << "[AudioEngine] Play" << std::endl;
-    
-    // Open current track if not already open OR if at EOF
-    if (!m_currentDecoder || m_currentDecoder->isEOF()) {
-        std::cout << "[AudioEngine] Opening track (new or after EOF)" << std::endl;
-        
-        if (!openCurrentTrack()) {
-            std::cerr << "[AudioEngine] Failed to open track" << std::endl;
-            return false;
-        }
-    }
-    
-    m_state = State::PLAYING;
-    m_samplesPlayed = 0;
-    m_silenceCount = 0;
-    m_isDraining = false;
-    
-    // Preload next track in background if set (for gapless)
-    // Use joinable thread instead of detached to prevent use-after-free
-    if (!m_nextURI.empty() && !m_nextDecoder && !m_preloadRunning.load(std::memory_order_acquire)) {
-        waitForPreloadThread();
-        m_preloadRunning.store(true, std::memory_order_release);
-        m_preloadThread = std::thread([this]() {
-            preloadNextTrack();
-            m_preloadRunning.store(false, std::memory_order_release);
-        });
-    }
-    
-    return true;
-}
-void AudioEngine::stop() {
-    std::cout << "[AudioEngine] stop() called, current state = " 
-              << (int)m_state.load() << std::endl;
-    
-    // Changer l'état SANS mutex (atomic)
-    m_state.store(State::STOPPED);
-
-    // Clear pending flags
-    m_pendingNextTrack.store(false, std::memory_order_release);
-    {
-        std::lock_guard<std::mutex> pendingLock(m_pendingMutex);
-        m_pendingNextURI.clear();
-        m_pendingNextMetadata.clear();
-    }
-
-    // Wait for preload thread before cleanup
-    waitForPreloadThread();
-
-    std::cout << "[AudioEngine] ✓ State changed to STOPPED" << std::endl;
-
-    // CRITICAL: Nettoyer TOUT pour forcer réouverture au prochain play()
-    std::unique_lock<std::mutex> lock(m_mutex, std::try_to_lock);
-    if (lock.owns_lock()) {
-        std::cout << "[AudioEngine] Cleaning up decoders and state..." << std::endl;
-        
-        // Fermer les décodeurs
-        m_currentDecoder.reset();
-        m_nextDecoder.reset();
-        
-        // Réinitialiser la position
-        m_samplesPlayed = 0;
-        m_silenceCount = 0;
-        m_isDraining = false;
-        
-        // CRITICAL: NE PAS effacer m_currentURI !
-        // On veut pouvoir redémarrer la même piste depuis le début
-        
-        std::cout << "[AudioEngine] ✓ Full cleanup completed" << std::endl;
-    } else {
-        std::cout << "[AudioEngine] ⚠️  Mutex busy, cleanup deferred" << std::endl;
-        // Le cleanup sera fait au prochain process() qui verra l'état STOPPED
-    }
-}
-
-
-void AudioEngine::pause() {
-    std::cout << "[AudioEngine] Pause requested" << std::endl;
-    
-    // ⭐ NE PAS bloquer sur le mutex !
-    // Changer l'état directement (m_state est atomique)
-    State expected = State::PLAYING;  // ⭐ Correct type
-    if (m_state.compare_exchange_strong(expected, State::PAUSED)) {
-        std::cout << "[AudioEngine] ✓ State changed to PAUSED" << std::endl;
-    }
-    
-    std::cout << "[AudioEngine] Pause" << std::endl;
-}
-double AudioEngine::getPosition() const {
-    if (m_currentTrackInfo.sampleRate == 0) {
-        return 0.0;
-    }
-    return static_cast<double>(m_samplesPlayed) / m_currentTrackInfo.sampleRate;
-}
-
-bool AudioEngine::process(size_t samplesNeeded) {
-    // Vérification rapide sans mutex
-    State currentState = m_state.load();
-    
-    // ⭐⭐⭐ CRITICAL: Process async seek request (lock-free check)
-    // This runs in the audio thread, so we can safely take the mutex
-    if (m_seekRequested.load(std::memory_order_acquire)) {
-        double targetSeconds = m_seekTarget.load(std::memory_order_acquire);
-        m_seekRequested.store(false, std::memory_order_release);
-        
-        std::cout << "[AudioEngine] 🔍 Processing async seek to " << targetSeconds << "s" << std::endl;
-        
-        // Now we can safely take the mutex (we're in the audio thread)
-        std::lock_guard<std::mutex> seekLock(m_mutex);
-        
-        // Validate decoder exists
-        if (!m_currentDecoder) {
-            std::cerr << "[AudioEngine] ❌ No decoder for seek" << std::endl;
-            // Don't return false - continue playing
+        // Determine DSD rate (DSD64, DSD128, etc.)
+        // DSD rates are based on 44.1kHz × 64/128/256/512
+        if (format.sampleRate == 2822400) {
+            std::cout << "DSD64 (2822400 Hz)" << std::endl;
+            formatID |= DIRETTA::FormatID::RAT_44100 | DIRETTA::FormatID::RAT_MP64;
+            DEBUG_LOG("[DirettaOutput]    ✅ DSD64 configured");
+        } else if (format.sampleRate == 5644800) {
+            std::cout << "DSD128 (5644800 Hz)" << std::endl;
+            formatID |= DIRETTA::FormatID::RAT_44100 | DIRETTA::FormatID::RAT_MP128;
+            DEBUG_LOG("[DirettaOutput]    ✅ DSD128 configured");
+        } else if (format.sampleRate == 11289600) {
+            std::cout << "DSD256 (11289600 Hz)" << std::endl;
+            formatID |= DIRETTA::FormatID::RAT_44100 | DIRETTA::FormatID::RAT_MP256;
+            DEBUG_LOG("[DirettaOutput]    ✅ DSD256 configured");
+                 } else if (format.sampleRate == 22579200) {
+            std::cout << "DSD512 (22579200 Hz)" << std::endl;
+            formatID |= DIRETTA::FormatID::RAT_44100 | DIRETTA::FormatID::RAT_MP512;
+            DEBUG_LOG("[DirettaOutput]    ✅ DSD512 configured");
+        } else if (format.sampleRate == 45158400) {
+            std::cout << "DSD1024 (45158400 Hz)" << std::endl;
+            formatID |= DIRETTA::FormatID::RAT_44100 | DIRETTA::FormatID::RAT_MP1024;
+            DEBUG_LOG("[DirettaOutput]    ✅ DSD1024 configured");   
         } else {
-            // Validate position
-            const TrackInfo& info = m_currentTrackInfo;
-            if (info.sampleRate > 0 && info.duration > 0) {
-                double maxSeconds = static_cast<double>(info.duration) / info.sampleRate;
-                if (targetSeconds > maxSeconds) {
-                    targetSeconds = maxSeconds;
-                }
-                if (targetSeconds < 0) {
-                    targetSeconds = 0;
-                }
-                
-                // Perform the actual seek
-                if (m_currentDecoder->seek(targetSeconds)) {
-                    // Update position
-                    m_samplesPlayed = static_cast<uint64_t>(targetSeconds * info.sampleRate);
-                    
-                    // Reset drainage counters
-                    m_silenceCount = 0;
-                    m_isDraining = false;
-                    
-                    std::cout << "[AudioEngine] ✓ Seek completed to " << targetSeconds << "s" << std::endl;
-                    DEBUG_LOG("[AudioEngine] ✓ Position updated to " 
-                              << m_samplesPlayed << " samples (" << targetSeconds << "s)");
-                } else {
-                    std::cerr << "[AudioEngine] ❌ Seek failed in decoder" << std::endl;
-                }
-            }
+            std::cerr << "[DirettaOutput]    ⚠️  Unknown DSD rate: " << format.sampleRate << std::endl;
+            formatID |= DIRETTA::FormatID::RAT_44100 | DIRETTA::FormatID::RAT_MP64;
+        }
+    } else {
+        // PCM FORMAT (existing code - unchanged)
+        switch (format.bitDepth) {
+            case 16: formatID = DIRETTA::FormatID::FMT_PCM_SIGNED_16; break;
+            case 24: formatID = DIRETTA::FormatID::FMT_PCM_SIGNED_24; break;
+            case 32: formatID = DIRETTA::FormatID::FMT_PCM_SIGNED_32; break;
+            default: formatID = DIRETTA::FormatID::FMT_PCM_SIGNED_32; break;
         }
         
-        // Continue processing after seek
-    }
-    
-    std::lock_guard<std::mutex> lock(m_mutex);    
-    // Double vérification avec mutex
-    if (m_state.load() != State::PLAYING) {
-        return false;
-    }
-
-    // Apply pending next URI from UPnP thread
-    if (m_pendingNextTrack.load(std::memory_order_acquire)) {
-        {
-            std::lock_guard<std::mutex> pendingLock(m_pendingMutex);
-            m_nextURI = m_pendingNextURI;
-            m_nextMetadata = m_pendingNextMetadata;
-            m_pendingNextURI.clear();
-            m_pendingNextMetadata.clear();
-        }
-        m_pendingNextTrack.store(false, std::memory_order_release);
-        std::cout << "[AudioEngine] Pending next URI applied (gapless)" << std::endl;
-    }
-
-    // Safety net: auto-reopen if decoder null while PLAYING
-    if (!m_currentDecoder) {
-        if (!m_currentURI.empty()) {
-            if (!openCurrentTrack()) {
-                std::cerr << "[AudioEngine] Failed to reopen track" << std::endl;
-                m_state = State::STOPPED;
-                if (m_trackEndCallback) {
-                    m_trackEndCallback();
-                }
-                return false;
-            }
-            m_samplesPlayed = 0;
-            m_silenceCount = 0;
-            m_isDraining = false;
+        uint32_t baseRate;
+        uint32_t multiplier;
+        
+        if (format.sampleRate % 44100 == 0) {
+            baseRate = 44100;
+            multiplier = format.sampleRate / 44100;
+            formatID |= DIRETTA::FormatID::RAT_44100;
+        } else if (format.sampleRate % 48000 == 0) {
+            baseRate = 48000;
+            multiplier = format.sampleRate / 48000;
+            formatID |= DIRETTA::FormatID::RAT_48000;
         } else {
-            return false;
+            baseRate = 44100;
+            multiplier = 1;
+            formatID |= DIRETTA::FormatID::RAT_44100;
+        }
+        
+        std::cout << "[DirettaOutput] " << format.sampleRate << "Hz = " 
+                  << baseRate << "Hz × " << multiplier << std::endl;
+        
+        if (multiplier == 1) {
+            formatID |= DIRETTA::FormatID::RAT_MP1;
+            std::cout << "[DirettaOutput] Multiplier: x1 (RAT_MP1)" << std::endl;
+        } else if (multiplier == 2) {
+            formatID |= DIRETTA::FormatID::RAT_MP2;
+            std::cout << "[DirettaOutput] Multiplier: x2 (RAT_MP2)" << std::endl;
+        } else if (multiplier == 4) {
+            formatID |= DIRETTA::FormatID::RAT_MP4;
+            std::cout << "[DirettaOutput] Multiplier: x4 (RAT_MP4 ONLY)" << std::endl;
+        } else if (multiplier == 8) {
+            formatID |= DIRETTA::FormatID::RAT_MP8;
+            std::cout << "[DirettaOutput] Multiplier: x8 (RAT_MP8 ONLY)" << std::endl;
+        } else if (multiplier >= 16) {
+            formatID |= DIRETTA::FormatID::RAT_MP16;
+            std::cout << "[DirettaOutput] Multiplier: x16 (RAT_MP16 ONLY)" << std::endl;
         }
     }
-
-    // Determine output format
-    uint32_t outputRate = m_currentTrackInfo.sampleRate;
-    uint32_t outputBits = m_currentTrackInfo.bitDepth;
-    uint32_t outputChannels = m_currentTrackInfo.channels;
     
-    // For DSD, keep native rate and bit depth
-    if (!m_currentTrackInfo.isDSD) {
-        // For PCM, we can target specific output format if needed
-        // For now, keep source format (bit-perfect)
-    }
-    
-    // Read samples from decoder
-    size_t samplesRead = m_currentDecoder->readSamples(
-        m_buffer,
-        samplesNeeded,
-        outputRate,
-        outputBits
+    // Add channels (common to both PCM and DSD)
+    switch (format.channels) {
+        case 1: formatID |= DIRETTA::FormatID::CHA_1; break;
+        case 2: formatID |= DIRETTA::FormatID::CHA_2; break;
+        case 4: formatID |= DIRETTA::FormatID::CHA_4; break;
+        case 6: formatID |= DIRETTA::FormatID::CHA_6; break;
+        case 8: formatID |= DIRETTA::FormatID::CHA_8; break;
+        default: formatID |= DIRETTA::FormatID::CHA_2; break;
+    }    
+     // ===== SYNCBUFFER SETUP (SinHost order) =====
+    DEBUG_LOG("[DirettaOutput] 1. Opening...");
+    m_syncBuffer->open(
+        DIRETTA::Sync::THRED_MODE(1),
+        ACQUA::Clock::MilliSeconds(100),
+        0, "DirettaRenderer", 0, 0, 0, 0,
+        DIRETTA::Sync::MSMODE_AUTO
     );
     
-    // ⚡ CRITICAL: Preload next track as soon as EOF flag is set (for gapless)
-    // Check AFTER readSamples() because EOF flag is set during the read
-    if (!m_nextDecoder && !m_nextURI.empty() && m_currentDecoder->isEOF()) {
-        std::cout << "[AudioEngine] 📀 EOF flag detected, preloading next track for gapless..." << std::endl;
-        preloadNextTrack();
-    }
+    DEBUG_LOG("[DirettaOutput] 2. Setting sink...");
+    m_syncBuffer->setSink(
+        m_targetAddress,
+        ACQUA::Clock::MilliSeconds(100),
+        false,
+        m_mtu
+    );
     
-    if (samplesRead > 0) {
-        // Call audio callback to send data to output
-        if (m_audioCallback) {
-            bool continuePlayback = m_audioCallback(
-                m_buffer,
-                samplesRead,
-                outputRate,
-                outputBits,
-                outputChannels
-            );
-            
-            if (!continuePlayback) {
-                std::cout << "[AudioEngine] Playback stopped by callback" << std::endl;
-                m_state = State::STOPPED;
-                return false;
-            }
-        }
-        
-        m_samplesPlayed += samplesRead;
-    }
+    // ===== FORMAT NEGOTIATION (Yu Harada recommendation) =====
+    // "Diretta only transfers RAW data - no decoding or bit expansion"
+    // "Need to comply with Target's requirements"
+    // Use checkSinkSupport or getSinkConfigure to verify compatibility
     
-    // Check for actual end of data (no more samples can be read)
-    if (samplesRead == 0) {
-        
-        // Log "Track finished" only once
-        if (!m_isDraining) {
-            std::cout << "[AudioEngine] ⚠️  No more samples available from decoder" << std::endl;
-            m_isDraining = true;
-            m_silenceCount = 0;
-        }
+    DEBUG_LOG("[DirettaOutput] 3. Format negotiation with Target...");
     
-        // Check if we have a next track ready for gapless
-        if (m_nextDecoder) {
-            std::cout << "[AudioEngine] 🎵 Transitioning to next track (gapless)..." << std::endl;
-            m_isDraining = false;
-            transitionToNextTrack();
-            return true;  // Continue playback with new track
-        } 
-        
-        // ⭐ NEW (v1.0.16): Check if next track exists but decoder was cleared (format change)
-        if (!m_nextURI.empty()) {
-            std::cout << "[AudioEngine] 🔄 Next track with format change detected" << std::endl;
-            std::cout << "[AudioEngine] Transitioning with stop/start sequence..." << std::endl;
-            
-            // Save next URI before stopping
-            std::string nextURI = m_nextURI;
-            std::string nextMetadata = m_nextMetadata;
-            
-            // Signal track end to allow clean transition
-            if (m_trackEndCallback) {
-                m_trackEndCallback();
-            }
-            
-            // Apply next URI as current
-            m_currentURI = nextURI;
-            m_currentMetadata = nextMetadata;
-            m_nextURI.clear();
-            m_nextMetadata.clear();
-            
-            // Reset for new track
-            m_isDraining = false;
-            m_samplesPlayed = 0;
-            m_trackNumber++;
-            
-            // Stop current playback (will close DirettaOutput)
-            std::cout << "[AudioEngine] Stopping for format change..." << std::endl;
-            m_currentDecoder.reset();
-            
-            // Reopen with new track (will be done in next process() call via openCurrentTrack())
-            return true;  // Continue playback state
-        }
-        
-        // No next track - drain buffer and stop
-        std::cout << "[AudioEngine] 🔇 No next track, draining buffer..." << std::endl;
-        
-        if (m_silenceCount == 0) {
-            std::cout << "[AudioEngine] 🔇 No next track, waiting for Diretta drain..." << std::endl;
-        }
-        
-        m_silenceCount++;
-        
-        // After a short wait to ensure last samples were sent, signal stop
-        // Diretta has ~2-4s of buffer, but we don't need to send silence
-        // The stop() function will wait for buffer_empty()
-        if (m_silenceCount > 5) {  // 5 * ~92ms = ~500ms safety margin
-            std::cout << "[AudioEngine] ✓ Last samples sent, signaling stop" << std::endl;
-            m_silenceCount = 0;
-            m_isDraining = false;
-            m_state = State::STOPPED;
-            
-            if (m_trackEndCallback) {
-                m_trackEndCallback();
-            }
-            
-            return false;  // Stop processing, let DirettaOutput::stop() drain
-        }
-        
-        // Return false to stop sending samples, but keep state as PLAYING briefly
-        return false;
-    }
-
-     return true;
-}
-bool AudioEngine::openCurrentTrack() {
-    // Note: This function is called from play() which already holds the mutex
-    
-    if (m_currentURI.empty()) {
-        std::cerr << "[AudioEngine] No current URI set" << std::endl;
-        return false;
-    }
-    
-    std::cout << "[AudioEngine] Opening track: " << m_currentURI.substr(0, 80) << "..." << std::endl;
-    
-    // Create decoder
-    m_currentDecoder = std::make_unique<AudioDecoder>();
-    
-    if (!m_currentDecoder->open(m_currentURI)) {
-        std::cerr << "[AudioEngine] Failed to open track" << std::endl;
-        m_currentDecoder.reset();
-        return false;
-    }
-    
-    m_currentTrackInfo = m_currentDecoder->getTrackInfo();
-    
-    std::cout << "[AudioEngine] ✓ Track opened: ";
-    if (m_currentTrackInfo.isDSD) {
-        std::cout << "DSD" << m_currentTrackInfo.dsdRate 
-                  << " (" << m_currentTrackInfo.sampleRate << " Hz)";
+    // Try to configure the requested format
+    DEBUG_LOG("[DirettaOutput]    Requesting format: ");
+    if (format.isDSD) {
+        std::cout << "DSD" << (format.sampleRate / 44100) << " (" << format.sampleRate << "Hz)";
     } else {
-        std::cout << m_currentTrackInfo.sampleRate << "Hz/"
-                  << m_currentTrackInfo.bitDepth << "bit";
+        std::cout << "PCM " << format.bitDepth << "-bit " << format.sampleRate << "Hz";
     }
-    std::cout << "/" << m_currentTrackInfo.channels << "ch" << std::endl;
+    std::cout << " " << format.channels << "ch" << std::endl;
     
-    // Call track change callback with URI and metadata
-    if (m_trackChangeCallback) {
-        m_trackChangeCallback(m_trackNumber, m_currentTrackInfo, m_currentURI, m_currentMetadata);
-    }
+    m_syncBuffer->setSinkConfigure(formatID);
     
-    return true;
-}
-
-bool AudioEngine::preloadNextTrack() {
-    if (m_nextURI.empty()) {
-        return false;
-    }
+    // Verify the configured format with Target
+    DIRETTA::FormatID configuredFormat = m_syncBuffer->getSinkConfigure();
     
-    DEBUG_LOG("[AudioEngine] Preloading next track for gapless...");
-    
-    // Create decoder for next track
-    m_nextDecoder = std::make_unique<AudioDecoder>();
-    
-    if (!m_nextDecoder->open(m_nextURI)) {
-        std::cerr << "[AudioEngine] Failed to preload next track" << std::endl;
-        m_nextDecoder.reset();
-        return false;
-    }
-
-    // Check format compatibility for gapless playback
-    // Format changes require clean stop/start to avoid audio artifacts
-    TrackInfo nextInfo = m_nextDecoder->getTrackInfo();
-    bool formatWillChange = (
-        nextInfo.sampleRate != m_currentTrackInfo.sampleRate ||
-        nextInfo.bitDepth != m_currentTrackInfo.bitDepth ||
-        nextInfo.channels != m_currentTrackInfo.channels ||
-        nextInfo.isDSD != m_currentTrackInfo.isDSD
-    );
-
-    if (formatWillChange) {
-        DEBUG_LOG("[AudioEngine] ⚠️  FORMAT CHANGE DETECTED - Gapless disabled");
-        DEBUG_LOG("[AudioEngine] Current: "
-                  << m_currentTrackInfo.sampleRate << "Hz/"
-                  << m_currentTrackInfo.bitDepth << "bit/"
-                  << m_currentTrackInfo.channels << "ch"
-                  << (m_currentTrackInfo.isDSD ? " (DSD)" : ""));
-        DEBUG_LOG("[AudioEngine] Next: "
-                  << nextInfo.sampleRate << "Hz/"
-                  << nextInfo.bitDepth << "bit/"
-                  << nextInfo.channels << "ch"
-                  << (nextInfo.isDSD ? " (DSD)" : ""));
-        DEBUG_LOG("[AudioEngine] 🔄 Will use stop/start sequence instead of gapless");
-
-        // Don't keep nextDecoder - force stop/start sequence
-        m_nextDecoder.reset();
-        
-        // ⭐ CRITICAL FIX (v1.0.16): Keep m_nextURI!
-        // Do NOT clear m_nextURI - it will be used for non-gapless transition
-        // The EOF handler will see format change and trigger proper reopen
-        // m_nextURI.clear();     // ❌ REMOVED - was causing next track to be lost
-        // m_nextMetadata.clear(); // ❌ REMOVED
-        
-        return false;
-    }
-
-    DEBUG_LOG("[AudioEngine] ✓ Next track preloaded: "
-              << m_nextDecoder->getTrackInfo().codec);
-
-    return true;
-}
-
-void AudioEngine::transitionToNextTrack() {
-    DEBUG_LOG("[AudioEngine] Transition to next track (gapless)");
-    
-    // CRITICAL: Move next URI to current URI BEFORE clearing
-    m_currentURI = m_nextURI;
-    m_currentMetadata = m_nextMetadata;
-    
-    m_currentDecoder = std::move(m_nextDecoder);
-    m_trackNumber++;
-    m_samplesPlayed = 0;
-    
-    // Clear next URI after moving to current
-    m_nextURI.clear();
-    m_nextMetadata.clear();
-    
-    if (m_currentDecoder) {
-        m_currentTrackInfo = m_currentDecoder->getTrackInfo();
-        if (m_trackChangeCallback) {
-            m_trackChangeCallback(m_trackNumber, m_currentTrackInfo, m_currentURI, m_currentMetadata);
-        }
-    }
-}
-bool AudioDecoder::seek(double seconds) {
-    if (!m_formatContext || m_audioStreamIndex < 0) {
-        std::cerr << "[AudioDecoder] Cannot seek: no file open" << std::endl;
-        return false;
-    }
-    
-    // Pour le DSD natif raw, on ne peut pas seek
-    if (m_rawDSD) {
-        std::cerr << "[AudioDecoder] Seek not supported in raw DSD mode" << std::endl;
-        return false;
-    }
-    
-    std::cout << "[AudioDecoder] Seeking to " << seconds << " seconds..." << std::endl;
-    
-    // Convertir le temps en timestamp FFmpeg
-    AVStream* stream = m_formatContext->streams[m_audioStreamIndex];
-    int64_t timestamp = av_rescale_q(
-        static_cast<int64_t>(seconds * AV_TIME_BASE),
-        AV_TIME_BASE_Q,
-        stream->time_base
-    );
-    
-    // Effectuer le seek
-    // AVSEEK_FLAG_BACKWARD : cherche le keyframe le plus proche AVANT la position
-    int ret = av_seek_frame(m_formatContext, m_audioStreamIndex, timestamp, AVSEEK_FLAG_BACKWARD);
-    if (ret < 0) {
-        char errbuf[AV_ERROR_MAX_STRING_SIZE];
-        av_strerror(ret, errbuf, sizeof(errbuf));
-        std::cerr << "[AudioDecoder] Seek failed: " << errbuf << std::endl;
-        return false;
-    }
-    
-    // Vider les buffers du codec
-    if (m_codecContext) {
-        avcodec_flush_buffers(m_codecContext);
-    }
-    
-    // Réinitialiser les buffers internes
-    m_remainingCount = 0;
-    m_eof = false;
-    
-    std::cout << "[AudioDecoder] ✓ Seek successful to ~" << seconds << "s" << std::endl;
-    
-    return true;
-}
-
-// ============================================================================
-// AudioEngine::seek() - Seek avec mise à jour de la position
-// ============================================================================
-
-bool AudioEngine::seek(double seconds) {
-    // ⭐⭐⭐ CRITICAL FIX: Async seek to avoid deadlock
-    // The UPnP thread calling this should not block waiting for mutex
-    // Instead, we set atomic flags and let the audio thread handle the seek
-    
-    std::cout << "[AudioEngine] ⏩ Seek requested to " << seconds << " seconds (async)" << std::endl;
-    
-    // Quick validation without mutex
-    if (m_state.load(std::memory_order_acquire) != State::PLAYING) {
-        std::cerr << "[AudioEngine] ❌ Cannot seek when not playing" << std::endl;
-        return false;
-    }
-    
-    // Clamp to valid range (optimistic check, will be validated in audio thread)
-    const TrackInfo& info = m_currentTrackInfo;
-    if (info.sampleRate > 0 && info.duration > 0) {
-        double maxSeconds = static_cast<double>(info.duration) / info.sampleRate;
-        if (seconds < 0) {
-            seconds = 0;
-        }
-        if (seconds > maxSeconds) {
-            DEBUG_LOG("[AudioEngine] Seek position clamped to " << maxSeconds << "s");
-            seconds = maxSeconds;
-        }
-    }
-    
-    // ⭐ Set seek request atomically (lock-free, non-blocking)
-    m_seekTarget.store(seconds, std::memory_order_release);
-    m_seekRequested.store(true, std::memory_order_release);
-    
-    std::cout << "[AudioEngine] ✓ Seek queued, will be processed by audio thread" << std::endl;
-    
-    // Return immediately - UPnP thread doesn't wait
-    return true;
-}
-
-// ============================================================================
-// AudioEngine::seek() - Version avec string "HH:MM:SS"
-// ============================================================================
-
-bool AudioEngine::seek(const std::string& timeStr) {
-    // Parser le format HH:MM:SS ou MM:SS
-    int hours = 0, minutes = 0, seconds = 0;
-    
-    // Compter les ':'
-    size_t colonCount = std::count(timeStr.begin(), timeStr.end(), ':');
-    
-    if (colonCount == 2) {
-        // Format HH:MM:SS
-        if (sscanf(timeStr.c_str(), "%d:%d:%d", &hours, &minutes, &seconds) != 3) {
-            std::cerr << "[AudioEngine] Invalid time format: " << timeStr << std::endl;
-            return false;
-        }
-    } else if (colonCount == 1) {
-        // Format MM:SS
-        if (sscanf(timeStr.c_str(), "%d:%d", &minutes, &seconds) != 2) {
-            std::cerr << "[AudioEngine] Invalid time format: " << timeStr << std::endl;
-            return false;
-        }
+    if (configuredFormat == formatID) {
+        DEBUG_LOG("[DirettaOutput]    ✅ Target accepted requested format");
     } else {
-        // Format numérique simple (secondes)
-        try {
-            double secs = std::stod(timeStr);
-            return seek(secs);
-        } catch (...) {
-            std::cerr << "[AudioEngine] Invalid time format: " << timeStr << std::endl;
-            return false;
+        std::cout << "[DirettaOutput]    ⚠️  Target modified format!" << std::endl;
+        std::cout << "[DirettaOutput]       Requested: 0x" << std::hex << static_cast<uint32_t>(formatID) << std::dec << std::endl;
+        std::cout << "[DirettaOutput]       Accepted:  0x" << std::hex << static_cast<uint32_t>(configuredFormat) << std::dec << std::endl;
+        
+        // Check if it's a bit depth issue (common for SPDIF targets)
+        if (!format.isDSD) {
+            // Extract bit depth from configured format  
+            if ((configuredFormat & DIRETTA::FormatID::FMT_PCM_SIGNED_16) == DIRETTA::FormatID::FMT_PCM_SIGNED_16) {
+                std::cout << "[DirettaOutput]       Target forced 16-bit (SPDIF limitation)" << std::endl;
+                m_currentFormat.bitDepth = 16;  // Update our format tracking
+            } else if ((configuredFormat & DIRETTA::FormatID::FMT_PCM_SIGNED_24) == DIRETTA::FormatID::FMT_PCM_SIGNED_24) {
+                std::cout << "[DirettaOutput]       Target forced 24-bit" << std::endl;
+                m_currentFormat.bitDepth = 24;  // Update our format tracking
+            } else if ((configuredFormat & DIRETTA::FormatID::FMT_PCM_SIGNED_32) == DIRETTA::FormatID::FMT_PCM_SIGNED_32) {
+                std::cout << "[DirettaOutput]       Target forced 32-bit" << std::endl;
+                m_currentFormat.bitDepth = 32;  // Update our format tracking
+            }
         }
+        
+        // Use the format accepted by Target
+        formatID = configuredFormat;
     }
     
-    // Convertir en secondes totales
-    double totalSeconds = hours * 3600.0 + minutes * 60.0 + seconds;
+    DEBUG_LOG("[DirettaOutput] 3. Setting format...");
+    // Format already configured during negotiation above
     
-    DEBUG_LOG("[AudioEngine] Parsed time: " << timeStr 
-              << " = " << totalSeconds << " seconds")
-    
-    return seek(totalSeconds);
- }
+// 4. Configuring transfer...
+DEBUG_LOG("[DirettaOutput] 4. Configuring transfer...");
 
-uint32_t AudioEngine::getCurrentSampleRate() const {
-    return m_currentTrackInfo.sampleRate;
+// ⭐ Détecter les formats bas débit qui nécessitent des paquets plus petits
+bool isLowBitrate = (format.bitDepth <= 16 && format.sampleRate <= 48000 && !format.isDSD);
+
+if (isLowBitrate) {
+    // Pour 16bit/44.1kHz, 16bit/48kHz : paquets plus petits pour éviter les drops
+    std::cout << "[DirettaOutput] ⚠️  Low bitrate format detected (" 
+              << format.bitDepth << "bit/" << format.sampleRate << "Hz)" << std::endl;
+    std::cout << "[DirettaOutput] Using configTransferAuto (smaller packets)" << std::endl;
+    
+    m_syncBuffer->configTransferAuto(
+        ACQUA::Clock::MicroSeconds(200),   // limitCycle
+        ACQUA::Clock::MicroSeconds(10),   // minCycle
+        ACQUA::Clock::MicroSeconds(10000)  // maxCycle
+    );
+    std::cout << "[DirettaOutput] ✓ configTransferAuto (packets ~1-3k)" << std::endl;
+} else {
+    // Pour Hi-Res (24bit, 88.2k+, DSD, etc.) : jumbo frames pour performance max
+    DEBUG_LOG("[DirettaOutput] ✓ Hi-Res format (" 
+              << format.bitDepth << "bit/" << format.sampleRate << "Hz)");
+    DEBUG_LOG("[DirettaOutput] Using configTransferVarMax (jumbo frames)");
+    
+    m_syncBuffer->configTransferVarMax(
+        ACQUA::Clock::MicroSeconds(200)   // limitCycle
+    );
+    DEBUG_LOG("[DirettaOutput] ✓ configTransferVarMax (Packet Full mode, ~16k)");
 }
+DEBUG_LOG("[DirettaOutput] DEBUG: MTU passed to setSink: " << m_mtu);
+DEBUG_LOG("[DirettaOutput] DEBUG: Check packet size in tcpdump...");
+
+DEBUG_LOG("[DirettaOutput] configTransferAuto: limit=200us, min=333us, max=10000us");
+// Calculer manuellement au lieu de se fier à getSinkConfigure()
+int bytesPerSample;
+int frameSize;
+
+if (format.isDSD) {
+    // ✅ DSD with FMT_DSD_SIZ_32: 32-bit containers = 4 bytes per sample
+    bytesPerSample = 4;  // 32-bit word
+    frameSize = bytesPerSample * format.channels;  // 4 × 2 = 8 bytes for stereo
+    DEBUG_LOG("[DirettaOutput]      - DSD: Using 32-bit containers");
+} else {
+    // PCM: standard calculation
+    bytesPerSample = (format.bitDepth / 8);
+    frameSize = bytesPerSample * format.channels;
+}
+const int fs1sec = format.sampleRate;
+
+DEBUG_LOG("[DirettaOutput]    Manual calculation:");
+DEBUG_LOG("[DirettaOutput]      - Bytes per sample: " << bytesPerSample);
+DEBUG_LOG("[DirettaOutput]      - Frame size: " << frameSize << " bytes");
+DEBUG_LOG("[DirettaOutput]      - Frames per second: " << fs1sec);
+DEBUG_LOG("[DirettaOutput]      - Buffer: " << fs1sec << " × " << m_bufferSeconds 
+          << " = " << (fs1sec * m_bufferSeconds) << " frames");
+DEBUG_LOG("[DirettaOutput]      ⚠️  CRITICAL: This is " << m_bufferSeconds 
+          << " seconds of audio buffer in Diretta!");
+
+m_syncBuffer->setupBuffer(fs1sec * m_bufferSeconds, 4, false);
+    DEBUG_LOG("[DirettaOutput] 6. Connecting...");
+    m_syncBuffer->connect(0, 0);
+    // m_syncBuffer->connectWait();
+
+// Wait with timeout
+     int timeoutMs = 10000;
+   int waitedMs = 0;
+    while (!m_syncBuffer->is_connect() && waitedMs < timeoutMs) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        waitedMs += 100;
+    }
+
+
+
+    
+    if (!m_syncBuffer->is_connect()) {
+        std::cerr << "[DirettaOutput] ❌ Connection failed" << std::endl;
+        return false;
+    }
+    
+    DEBUG_LOG("[DirettaOutput] ✓ Connected: " << format.sampleRate 
+              << "Hz/" << format.bitDepth << "bit/" << format.channels << "ch");
+    
+    return true;
+}
+bool DirettaOutput::seek(int64_t samplePosition) {
+    std::cout << "[DirettaOutput] 🔍 Seeking to sample " << samplePosition << "..." << std::endl;
+
+    if (!m_syncBuffer) {
+        std::cerr << "[DirettaOutput] ⚠️  No SyncBuffer available for seek" << std::endl;
+        return false;
+     }
+
+    bool wasPlaying = m_playing;
+    
+    // Si en lecture, arrêter temporairement
+    if (wasPlaying && m_syncBuffer) {
+        std::cout << "[DirettaOutput] Pausing for seek..." << std::endl;
+        m_syncBuffer->stop();
+    }
+    
+    // Seek à la position
+    std::cout << "[DirettaOutput] Calling SyncBuffer::seek(" << samplePosition << ")..." << std::endl;
+    m_syncBuffer->seek(samplePosition);
+    
+    // Mettre à jour notre compteur
+    m_totalSamplesSent = samplePosition;
+    
+    // Si on était en lecture, reprendre
+    if (wasPlaying && m_syncBuffer) {
+        std::cout << "[DirettaOutput] Resuming after seek..." << std::endl;
+        m_syncBuffer->play();
+    }
+   
+    std::cout << "[DirettaOutput] ✓ Seeked to sample " << samplePosition << std::endl;
+    return true;
+   }
