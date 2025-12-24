@@ -331,9 +331,6 @@ void DirettaOutput::resume() {
 }
 
 
-
-
-
 bool DirettaOutput::changeFormat(const AudioFormat& newFormat) {
     std::cout << "[DirettaOutput] Format change request: "
               << m_currentFormat.sampleRate << "Hz/" << m_currentFormat.bitDepth << "bit"
