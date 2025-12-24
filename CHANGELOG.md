@@ -14,6 +14,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Essential for 3-tier architecture configurations with separate control and audio networks
   - Fixes SSDP discovery issues on systems with multiple network interfaces (VPN, multiple NICs, bridged networks)
   - Auto-detection remains default behavior for single-interface systems (backward compatible)
+  
+- **Advanced Configuration with command-line Parameters**
+  - ### Basic Options
+
+```bash
+--name, -n <name>       Renderer name (default: Diretta Renderer)
+--port, -p <port>       UPnP port (default: auto)
+--buffer, -b <seconds>  Buffer size in seconds (default: 2.0)
+--target, -t <index>    Select Diretta target by index (1, 2, 3...)
+--no-gapless            Disable gapless playback
+--verbose               Enable verbose debug output
+```
+ - ### Advanced Diretta SDK Options
+Fine-tune the Diretta protocol behavior for optimal performance such as Thread-mode, transfer timing....
 
 ### Fixed
 - **Critical**: Fixed format change freeze when transitioning between bit depths
