@@ -1779,4 +1779,3 @@ void AudioEngine::prepareNextTrackForGapless() {
 // ═══════════════════════════════════════════════════════════════
 // End of v1.2.0 Gapless Pro implementation
 // ═══════════════════════════════════════════════════════════════
-}
