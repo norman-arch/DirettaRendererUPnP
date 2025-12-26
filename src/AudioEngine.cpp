@@ -1724,16 +1724,23 @@ void AudioEngine::prepareNextTrackForGapless() {
     DEBUG_LOG("[AudioEngine] 🎵 Preparing next track for gapless: " << m_nextURI);
     
     try {
-        // Open the next track decoder
-        std::unique_ptr<AudioDecoder> nextDecoder = std::make_unique<AudioDecoder>();
-        
-        if (!nextDecoder->open(m_nextURI)) {
-            std::cerr << "[AudioEngine] ❌ Failed to open next track for gapless" << std::endl;
-            return;
+        // ⭐ OPTIMISATION v1.2.0: Réutiliser m_nextDecoder si déjà ouvert
+        if (!m_nextDecoder) {
+            DEBUG_LOG("[AudioEngine] Opening next track decoder...");
+            m_nextDecoder = std::make_unique<AudioDecoder>();
+            
+            if (!m_nextDecoder->open(m_nextURI)) {
+                std::cerr << "[AudioEngine] ❌ Failed to open next track for gapless" << std::endl;
+                m_nextDecoder.reset();  // Cleanup on failure
+                return;
+            }
+            DEBUG_LOG("[AudioEngine] ✓ Next track decoder opened");
+        } else {
+            DEBUG_LOG("[AudioEngine] ♻️  Reusing pre-loaded next track decoder");
         }
         
-        // Get format
-        const TrackInfo& nextTrackInfo = nextDecoder->getTrackInfo();
+        // Get format from m_nextDecoder
+        const TrackInfo& nextTrackInfo = m_nextDecoder->getTrackInfo();
         
         // Create AudioFormat for DirettaOutput
         AudioFormat nextFormat;
@@ -1750,9 +1757,10 @@ void AudioEngine::prepareNextTrackForGapless() {
         size_t bytesPerSample = (nextTrackInfo.bitDepth / 8) * nextTrackInfo.channels;
         nextBuffer.resize(samplesToRead * bytesPerSample);
         
-        size_t samplesRead = nextDecoder->readSamples(nextBuffer, samplesToRead,
-                                                      nextTrackInfo.sampleRate,
-                                                      nextTrackInfo.bitDepth);
+        // Read from m_nextDecoder
+        size_t samplesRead = m_nextDecoder->readSamples(nextBuffer, samplesToRead,
+                                                        nextTrackInfo.sampleRate,
+                                                        nextTrackInfo.bitDepth);
         
         if (samplesRead > 0) {
             // Call callback to send to DirettaOutput
@@ -1773,6 +1781,7 @@ void AudioEngine::prepareNextTrackForGapless() {
     } catch (const std::exception& e) {
         std::cerr << "[AudioEngine] ❌ Exception preparing next track: " 
                   << e.what() << std::endl;
+        m_nextDecoder.reset();  // Cleanup on exception
     }
 }
 
