@@ -1209,7 +1209,7 @@ void DirettaOutput::optimizeNetworkConfig(const AudioFormat& format) {
                   << " (" << format.sampleRate << "Hz)");
         DEBUG_LOG("[DirettaOutput]   Mode: VarMax (maximum throughput)");
         
-        DIRETTA::Clock cycle(m_cycleTime);
+        ACQUA::Clock cycle(m_cycleTime);
         m_syncBuffer->configTransferVarMax(cycle);
         
     } else if (format.sampleRate >= 192000 || 
@@ -1220,8 +1220,8 @@ void DirettaOutput::optimizeNetworkConfig(const AudioFormat& format) {
         DEBUG_LOG("[DirettaOutput]   Data rate: " << (dataRate / 1000000.0) << " Mbps");
         DEBUG_LOG("[DirettaOutput]   Mode: Var (adaptive timing)");
         
-        DIRETTA::Clock minTime(m_cycleMinTime);
-        DIRETTA::Clock maxTime(m_cycleTime);
+        ACQUA::Clock minTime(m_cycleMinTime);
+        ACQUA::Clock maxTime(m_cycleTime);
         m_syncBuffer->configTransferAuto(maxTime, minTime, maxTime);
         
     } else {
@@ -1231,7 +1231,7 @@ void DirettaOutput::optimizeNetworkConfig(const AudioFormat& format) {
         DEBUG_LOG("[DirettaOutput]   Data rate: " << (dataRate / 1000000.0) << " Mbps");
         DEBUG_LOG("[DirettaOutput]   Mode: Fix (stable timing)");
         
-        DIRETTA::Clock cycle(m_cycleTime);
+        ACQUA::Clock cycle(m_cycleTime);
         m_syncBuffer->configTransferFix(cycle, 0);  // 0 = auto packets
     }
     
@@ -1311,7 +1311,7 @@ bool DirettaOutput::prepareNextTrack(const uint8_t* data,
         
         // Get stream for writing
         bool canWrite = false;
-        DIRETTA::Stream& nextStream = m_syncBuffer->writeStreamStart(canWrite);
+        m_syncBuffer->writeStreamStart(canWrite);  // Check if can write
         
         if (!canWrite) {
             DEBUG_LOG("[DirettaOutput] ⚠️  Buffer full, cannot prepare next track yet");
