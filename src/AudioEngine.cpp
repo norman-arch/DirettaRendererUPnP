@@ -717,15 +717,16 @@ size_t AudioDecoder::readSamples(AudioBuffer& buffer, size_t numSamples,
     }
     
     size_t totalSamplesRead = 0;
-    // ✅ CRITICAL FIX: 24-bit uses S32 container (4 bytes), not 3!
-size_t bytesPerSample;
-if (m_trackInfo.isDSD) {
-    bytesPerSample = 1;
-} else {
-    // For PCM: 16-bit = 2 bytes, 24-bit and 32-bit = 4 bytes
-    bytesPerSample = (outputBits == 16) ? 2 : 4;
-    bytesPerSample *= m_trackInfo.channels;
-}
+    // ✅ CRITICAL FIX: 24-bit uses S32 container (4 bytes)
+    size_t bytesPerSample;
+    if (m_trackInfo.isDSD) {
+        bytesPerSample = 4;
+        bytesPerSample *= m_trackInfo.channels;
+    } else {
+        // For PCM: 16-bit = 2 bytes, 24-bit and 32-bit = 4 bytes
+        bytesPerSample = (outputBits == 16) ? 2 : 4;
+        bytesPerSample *= m_trackInfo.channels;
+    }
     
     // Ensure buffer is large enough
     if (buffer.size() < numSamples * bytesPerSample) {
