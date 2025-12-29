@@ -442,14 +442,11 @@ UPnPDevice::Callbacks callbacks;
 callbacks.onSetURI = [this](const std::string& uri, const std::string& metadata) {
     DEBUG_LOG("[DirettaRenderer] SetURI: " << uri);
     
-    AudioEngine::State currentState;
+    // ⭐ v1.1.2 FIX: Keep mutex locked during entire callback (v1.0.9 structure)
+    // waitForCallbackComplete() has 5s timeout - prevents deadlock
+    std::lock_guard<std::mutex> lock(m_mutex);
     
-    // ⭐ v1.1.1 FIX: Lock only to READ state, then RELEASE
-    {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        currentState = m_audioEngine->getState();
-    }
-    // ← m_mutex is NOW RELEASED - CRITICAL for avoiding deadlock
+    auto currentState = m_audioEngine->getState();
     
     // ⭐ Auto-STOP if playing (JPlay iOS compatibility - added in v1.0.8)
     if (currentState == AudioEngine::State::PLAYING || 
@@ -464,13 +461,10 @@ callbacks.onSetURI = [this](const std::string& uri, const std::string& metadata)
         std::cout << "[DirettaRenderer] 🛑 Auto-STOP before URI change (JPlay iOS compatibility)" << std::endl;
         std::cout << "════════════════════════════════════════" << std::endl;
 
-        // SYNC: Stop with callback mutex held, then wait for completion
-        {
-            std::lock_guard<std::mutex> cbLock(m_callbackMutex);
-            m_audioEngine->stop();
-        }
+        // Stop AudioEngine
+        m_audioEngine->stop();
         
-        // ⭐ v1.1.1 FIX: Now SAFE to wait - m_mutex is NOT held
+        // ⭐ v1.1.2: Wait with mutex held - SAFE (timeout prevents deadlock)
         waitForCallbackComplete();
 
         // Stop and close DirettaOutput
@@ -489,13 +483,10 @@ callbacks.onSetURI = [this](const std::string& uri, const std::string& metadata)
         DEBUG_LOG("[DirettaRenderer] ✓ Auto-STOP completed");
     }
     
-    // ⭐ v1.1.1: Now acquire mutex AGAIN to safely update URI
-    {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        this->m_currentURI = uri;
-        this->m_currentMetadata = metadata;
-        m_audioEngine->setCurrentURI(uri, metadata);
-    }
+    // ⭐ v1.1.2: Update URI with mutex still held - no race condition
+    this->m_currentURI = uri;
+    this->m_currentMetadata = metadata;
+    m_audioEngine->setCurrentURI(uri, metadata);
 };
 
 // CRITICAL: SetNextAVTransportURI pour le gapless
