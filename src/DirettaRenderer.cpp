@@ -360,12 +360,12 @@ m_audioEngine->setAudioCallback(
             DEBUG_LOG("[Callback]    Format: " << sampleRate << "Hz/" << bitDepth << "bit/" << channels << "ch");
             
             // Open Diretta connection
-            AudioFormat format(sampleRate, bitDepth, channels);
+            //AudioFormat format(sampleRate, bitDepth, channels);
             
             // ⭐ Propagate compression info for buffer optimization
-            format.isCompressed = trackInfo.isCompressed;
-            currentFormat.isDSD = trackInfo.isDSD;
-            
+            //format.isCompressed = trackInfo.isCompressed;
+            //currentFormat.isDSD = trackInfo.isDSD;
+
             // ⭐ Configure DSD if needed
                 if (trackInfo.isDSD) {
                 format.isDSD = true;
