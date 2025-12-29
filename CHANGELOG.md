@@ -6,9 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
-# Changelog - Version 1.1.1
+# Changelog - Version 1.1.2
 
-## [1.1.1] - 2024-12-25
+## [1.1.2] - 2025-12-29
+
+### Fixed
+### **setURI Race Condition on Format Changes**
+**Symptom in v1.1.1:**
+- Crash or erratic behavior on mixed-format playlists
+- Example: 44.1kHz/16bit → 96kHz/24bit → 192kHz/24bit → DSD64
+- Intermittent issue (timing-dependent)
+**Problem:**
+- Between lock/unlock/re-lock, state can change
+- Other threads can modify state during waitForCallbackComplete()
+- Rapid format changes create race condition
+
+## Solution in v1.1.2
+**Simplified structure - mutex held throughout callback:**
+
+## [1.1.1] - 2025-12-25
 
 ### Fixed
 

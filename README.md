@@ -8,8 +8,18 @@
 
 ---
 
-![Version](https://img.shields.io/badge/version-1.1.1-blue.svg)
-![Multi-Interface](https://img.shields.io/badge/multi--interface-supported-green.svg) ← NEW
+![Version](https://img.shields.io/badge/version-1.1.2-blue.svg)
+ - fixes a critical race condition bug occurring during audio format changes in mixed-format playlists.
+ ## ✅ Compatibility
+
+**100% compatible with v1.1.1:**
+- Same configuration
+- Same commands
+- Same interface
+
+**Migration:**
+- No action required
+- [Simply recompile and restart](#quick-start)
 ---
 
 ## ❤️ Support This Project
@@ -306,13 +316,13 @@ cd DirettaRendererUPnP
 make
 
 # Upgrade from a previous version:
-If you have a previous version installed
+If you have a previous version installed such as 1.1.0 or 1.1.1
 cd DirettaRendererUPnP
 git pull
 make clean
 make  or make NOLOG=1 if you want production version (better SQ has been reported)
 
-# Before installing service (if updating to version 1.0.9 - settings will be lost - not needed if you update from v1.1.0 to v1.1.1)
+# Before installing service (if updating to version 1.0.9 - settings will be lost - not needed if you update from v1.1.1 to v1.1.2)
 sudo rm /opt/diretta-renderer-upnp/diretta-renderer.conf
 
 sudo systemctl stop diretta-renderer
