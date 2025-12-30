@@ -334,7 +334,7 @@ bool DirettaOutput::changeFormat(const AudioFormat& newFormat) {
         
         // ⭐ STEP 2: WAIT FOR ALL QUEUED BUFFERS TO BE PLAYED
         std::cout << "[DirettaOutput] 2. Draining queued buffers..." << std::endl;
-        int drain_timeout_ms = 10000;  // 10 seconds max for drain
+        int drain_timeout_ms = 100;  // 10 seconds max for drain
         int drain_waited_ms = 0;
         
         // Get initial buffer count
