@@ -1128,7 +1128,7 @@ void DirettaOutput::optimizeNetworkConfig(const AudioFormat& format) {
         );
         DEBUG_LOG("[DirettaOutput] ✓ configTransferAuto (packets ~1-3k)");
         
-    } else {
+    } else {*/
         // Hi-Res / DSD: jumbo frames for max performance
         DEBUG_LOG("[DirettaOutput] ✓ Hi-Res format (" 
                   << format.bitDepth << "bit/" << format.sampleRate << "Hz)");
@@ -1139,7 +1139,7 @@ void DirettaOutput::optimizeNetworkConfig(const AudioFormat& format) {
         );
         DEBUG_LOG("[DirettaOutput] ✓ configTransferVarMax (Packet Full mode, ~16k)");
     }
-}*/
+}
 
 bool DirettaOutput::seek(int64_t samplePosition) {
     DEBUG_LOG("[DirettaOutput] 🔍 Seeking to sample " << samplePosition);
