@@ -853,8 +853,6 @@ See [Multi-Homed Systems](#multi-homed-systems--network-interface-selection) for
 
 ---
 
-## Section changelog à mettre à jour
-
 ### Version 1.0.9 (2024-12-24)
 
 **New Features:**
