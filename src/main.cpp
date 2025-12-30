@@ -12,7 +12,7 @@
 #include <chrono>
 
 // Version information
-#define RENDERER_VERSION "1.1.2"  // ← MISE À JOUR VERSION
+#define RENDERER_VERSION "1.1.1"  // ← MISE À JOUR VERSION
 #define RENDERER_BUILD_DATE __DATE__
 #define RENDERER_BUILD_TIME __TIME__
 // Global renderer instance for signal handler
@@ -56,13 +56,13 @@ DirettaRenderer::Config parseArguments(int argc, char* argv[]) {
     config.name = "Diretta Renderer";
     config.port = 0;  // 0 = auto
     config.gaplessEnabled = true;
-    config.bufferSeconds = 10.0f;  // Default 10 seconds (v1.1.2)
+    config.bufferSeconds = 2.0f;  // Default 2 seconds (v1.0.9)
     
     // ⭐ NEW: Advanced Diretta SDK settings
     config.threadMode = 1;        // Default: Critical only
     config.cycleTime = 10000;     // Default: 10ms
     config.cycleMinTime = 333;    // Default: 333µs
-    config.infoCycle = 100000;      // Default: 100ms
+    config.infoCycle = 5000;      // Default: 5ms
     config.mtuOverride = 0;       // 0 = auto-detect
     
     // ⭐ NEW: Network interface (empty = auto-detect)

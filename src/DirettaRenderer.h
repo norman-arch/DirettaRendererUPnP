@@ -85,4 +85,17 @@ private:
     std::string m_nextMetadata;
 
     // Callback synchronization - prevents race with close()
+    mutable std::mutex m_callbackMutex;
+    std::condition_variable m_callbackCV;
+    bool m_callbackRunning{false};
+
+    void waitForCallbackComplete() {
+        std::unique_lock<std::mutex> lk(m_callbackMutex);
+        bool completed = m_callbackCV.wait_for(lk, std::chrono::seconds(5),
+            [this]{ return !m_callbackRunning; });
+        if (!completed) {
+            std::cerr << "[DirettaRenderer] CRITICAL: Callback timeout!" << std::endl;
+            m_callbackRunning = false;
+        }
+    }
 };
