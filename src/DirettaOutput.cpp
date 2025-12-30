@@ -1110,13 +1110,35 @@ void DirettaOutput::optimizeNetworkConfig(const AudioFormat& format) {
         return;
     }
     
-    DEBUG_LOG("[DirettaOutput] 🔧 Configuring network: VarMax (maximum throughput)");
+    // ⭐ v1.2.0 Stable: Use v1.0.6 proven configuration
+    // CRITICAL: cycleTime must be 200µs, NOT 10000µs (50× difference!)
     
-    // ⭐ v1.2.0: Use VarMax for all formats (best performance with jumbo frames)
-    ACQUA::Clock cycle(m_cycleTime);
-    m_syncBuffer->configTransferVarMax(cycle);
-    
-    DEBUG_LOG("[DirettaOutput] ✓ Network configured: VarMax mode");
+    bool isLowBitrate = (format.bitDepth <= 16 && format.sampleRate <= 48000 && !format.isDSD);
+
+    if (isLowBitrate) {
+        // Low bitrate: smaller packets to avoid drops
+        DEBUG_LOG("[DirettaOutput] ⚠️  Low bitrate format detected (" 
+                  << format.bitDepth << "bit/" << format.sampleRate << "Hz)");
+        DEBUG_LOG("[DirettaOutput] Using configTransferAuto (smaller packets)");
+        
+        m_syncBuffer->configTransferAuto(
+            ACQUA::Clock::MicroSeconds(200),   // limitCycle
+            ACQUA::Clock::MicroSeconds(333),   // minCycle
+            ACQUA::Clock::MicroSeconds(10000)  // maxCycle
+        );
+        DEBUG_LOG("[DirettaOutput] ✓ configTransferAuto (packets ~1-3k)");
+        
+    } else {
+        // Hi-Res / DSD: jumbo frames for max performance
+        DEBUG_LOG("[DirettaOutput] ✓ Hi-Res format (" 
+                  << format.bitDepth << "bit/" << format.sampleRate << "Hz)");
+        DEBUG_LOG("[DirettaOutput] Using configTransferVarMax (jumbo frames)");
+        
+        m_syncBuffer->configTransferVarMax(
+            ACQUA::Clock::MicroSeconds(200)   // 200µs - CRITICAL!
+        );
+        DEBUG_LOG("[DirettaOutput] ✓ configTransferVarMax (Packet Full mode, ~16k)");
+    }
 }
 
 bool DirettaOutput::seek(int64_t samplePosition) {
