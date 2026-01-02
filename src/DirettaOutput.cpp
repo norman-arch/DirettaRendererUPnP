@@ -65,77 +65,37 @@ bool DirettaOutput::open(const AudioFormat& format, float bufferSeconds) {
     
     m_currentFormat = format;
     m_totalSamplesSent = 0;
-    DEBUG_LOG("[DirettaOutput] ⭐ m_totalSamplesSent RESET to 0"); 
+    DEBUG_LOG("[DirettaOutput] ⭐ m_totalSamplesSent RESET to 0");
     
-    // ✅ INTELLIGENT BUFFER ADAPTATION based on processing complexity
-    //
-    // Processing Pipeline Complexity:
-    // 1. DSD (DSF/DFF):        Raw bitstream read      → 0.8s  (instant)
-    // 2. WAV/AIFF:             Direct PCM read         → 1.0s  (very fast)
-    // 3. FLAC/ALAC/APE:        Lossless decompression  → 2.0s  (moderate)
-    //
-    // This matches Dominique's insight: Diretta can handle uncompressed 
-    // formats as efficiently as DSD, since both skip the decode step!
+    // ⭐ v1.4.0: SDK Diretta Gapless Pro handles ALL buffering intelligently
+    // User controls buffer via --buffer parameter, SDK adapts automatically
+    // Tests show even --buffer 0 works perfectly - SDK manages everything!
     
-    float effectiveBuffer;
+    float effectiveBuffer = bufferSeconds;  // Respect user choice by default
     
     if (format.isDSD) {
-        // DSD: Raw bitstream, zero decode overhead
-        effectiveBuffer = std::min(bufferSeconds, 0.02f);
-        DEBUG_LOG("[DirettaOutput] 🎵 DSD: raw bitstream path");
-        
-    } else if (!format.isCompressed) {
-        // WAV/AIFF: Uncompressed PCM - intelligent buffer sizing
-        
-        // ⚠️  LOOPBACK DETECTION (v1.0.10)
-        // Check if this is local playback (same-machine streaming)
-        // In loopback mode, data arrives in bursts without network buffering
-        bool isLoopback = false;
-        // Heuristic: If MTU is default (not jumbo), likely loopback wasn't configured
-        // Real network would use jumbo frames (16128)
-        // This is a simple heuristic - not perfect but works in most cases
-        if (m_mtu <= 1500) {
-            isLoopback = true;
-        }
-        
-        if (format.bitDepth >= 24 && format.sampleRate >= 88200) {
-            // Hi-Res audio handling
-            if (isLoopback && format.sampleRate <= 96000) {
-                // Loopback + Hi-Res ≤96kHz: needs larger buffer
-                // Reason: Data arrives in bursts, need extra buffer to prevent underruns
-                effectiveBuffer = std::max(std::min(bufferSeconds, 0.5f), 0.2f);
-                DEBUG_LOG("[DirettaOutput] ⚠️  Loopback Hi-Res detected (" << format.bitDepth 
-                          << "bit/" << format.sampleRate << "Hz)");
-                DEBUG_LOG("[DirettaOutput]   Using 2-2.5s buffer (burst protection)");
-                DEBUG_LOG("[DirettaOutput]   💡 TIP: For lower latency, use remote player");
-                DEBUG_LOG("[DirettaOutput]        or enable oversampling in your player");
-            } else {
-                // Network or high sample rate: normal buffer
-                effectiveBuffer = std::max(std::min(bufferSeconds, 0.8f), 0.4f);
-                DEBUG_LOG("[DirettaOutput] ✓ Hi-Res PCM (" << format.bitDepth 
-                          << "bit/" << format.sampleRate << "Hz): enhanced buffer");
-                DEBUG_LOG("[DirettaOutput]   Buffer: " << effectiveBuffer 
-                          << "s (DAC stabilization)");
-            }
-        } else {
-            // Standard PCM: low latency
-            effectiveBuffer = std::min(bufferSeconds, 1.0f);
-            DEBUG_LOG("[DirettaOutput] ✓ Uncompressed PCM: low-latency path");
-            DEBUG_LOG("[DirettaOutput]   Buffer: " << effectiveBuffer << "s");
-        }
+        // DSD: Minimal buffer optimal (SDK manages sync perfectly)
+        // Even 0.02s works great, but we cap at 0.05s for safety
+        effectiveBuffer = std::min(bufferSeconds, 0.05f);
+        std::cout << "[DirettaOutput] 🎵 DSD mode: minimal buffer " 
+                  << effectiveBuffer << "s (SDK-managed)" << std::endl;
         
     } else {
-        // FLAC/ALAC/etc: Compressed, needs decoding buffer
-        effectiveBuffer = std::max(bufferSeconds, 0.8f);
-        DEBUG_LOG("[DirettaOutput] ℹ️  Compressed PCM (FLAC/ALAC): decoding required");
+        // PCM (compressed or uncompressed): SDK handles efficiently
+        // No forced minimums - user has full control
+        std::cout << "[DirettaOutput] 🎵 PCM mode: user buffer " 
+                  << effectiveBuffer << "s (SDK-managed)" << std::endl;
         
-        if (bufferSeconds < 2) {
-            DEBUG_LOG("[DirettaOutput]   Using 2s minimum for decode stability");
+        // Optional warning if VERY small buffer (might cause issues on slow networks)
+        if (effectiveBuffer < 0.1f && effectiveBuffer > 0.0f) {
+            std::cout << "[DirettaOutput] ⚠️  Small buffer (" << effectiveBuffer 
+                      << "s) - may cause underruns on slow networks" << std::endl;
+            std::cout << "[DirettaOutput]    💡 Tip: Use --buffer 0.5 or higher for network streaming" << std::endl;
         }
     }
     
     m_bufferSeconds = effectiveBuffer;
-    DEBUG_LOG("[DirettaOutput] → Effective buffer: " << m_bufferSeconds << "s");
+    std::cout << "[DirettaOutput] → Buffer: " << m_bufferSeconds << "s" << std::endl;
     
     // Find Diretta target
     DEBUG_LOG("[DirettaOutput] Finding Diretta target...");
@@ -143,6 +103,35 @@ bool DirettaOutput::open(const AudioFormat& format, float bufferSeconds) {
         std::cerr << "[DirettaOutput] ❌ Failed to find or select Diretta target" << std::endl;
         return false;
     }
+    
+    DEBUG_LOG("[DirettaOutput] ✓ Target found and selected");
+    
+    // Configure Diretta with the format
+    if (!configureDiretta(format)) {
+        std::cerr << "[DirettaOutput] ❌ Failed to configure Diretta" << std::endl;
+        return false;
+    }
+    
+    DEBUG_LOG("[DirettaOutput] ✓ Diretta configured");
+    
+    // Network optimization
+    optimizeNetworkConfig(format);
+    
+    std::cout << "[DirettaOutput] ✅ Connection established" << std::endl;
+    std::cout << "[DirettaOutput]    Format: ";
+    if (format.isDSD) {
+        std::cout << "DSD" << (format.sampleRate / 44100) << " (" << format.sampleRate << "Hz)";
+    } else {
+        std::cout << "PCM " << format.bitDepth << "-bit " << format.sampleRate << "Hz";
+    }
+    std::cout << " " << format.channels << "ch" << std::endl;
+    std::cout << "[DirettaOutput]    Buffer: " << m_bufferSeconds << "s (SDK-managed)" << std::endl;
+    std::cout << "[DirettaOutput]    MTU: " << m_mtu << " bytes" << std::endl;
+    
+    m_connected = true;
+    return true;
+}
+
     
     DEBUG_LOG("[DirettaOutput] ✓ Found Diretta target");
     
