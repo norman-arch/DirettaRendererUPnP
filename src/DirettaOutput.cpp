@@ -415,7 +415,7 @@ bool DirettaOutput::changeFormat(const AudioFormat& newFormat) {
     }
     
     // Then explicit connectWait() - Yu's pattern
-    if (!m_syncBuffer->connectWait()) {
+    if (!m_syncBuffer->connectWait(1000)) {
         std::cerr << "[DirettaOutput] ❌ ConnectWait failed!" << std::endl;
         return false;
     }
