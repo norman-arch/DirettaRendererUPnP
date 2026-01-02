@@ -380,10 +380,8 @@ bool DirettaOutput::changeFormat(const AudioFormat& newFormat) {
     std::cout << "[DirettaOutput] 3. Setting new format configuration..." << std::endl;
     DIRETTA::FormatID newFormatID = buildFormatID(newFormat);
     
-    if (!m_syncBuffer->setSinkConfigure(newFormatID)) {
-        std::cerr << "[DirettaOutput] ❌ setSinkConfigure failed!" << std::endl;
-        return false;
-    }
+    m_syncBuffer->setSinkConfigure(newFormatID);
+    
     std::cout << "[DirettaOutput]    ✓ Format configured: " << newFormat.sampleRate << "Hz/"
               << newFormat.bitDepth << "bit/" << newFormat.channels << "ch" << std::endl;
     
@@ -402,10 +400,8 @@ bool DirettaOutput::changeFormat(const AudioFormat& newFormat) {
     // This reconfigures internal buffers for the new format
     std::cout << "[DirettaOutput] 5. Setting up buffer for new format..." << std::endl;
     
-    if (!m_syncBuffer->setupBuffer(fs1sec * m_bufferSeconds, 4, false)) {
-        std::cerr << "[DirettaOutput] ❌ setupBuffer failed!" << std::endl;
-        return false;
-    }
+    m_syncBuffer->setupBuffer(fs1sec * m_bufferSeconds, 4, false);
+    
     std::cout << "[DirettaOutput]    ✓ Buffer configured: " << (fs1sec * m_bufferSeconds) 
               << " samples (" << m_bufferSeconds << "s)" << std::endl;
     
