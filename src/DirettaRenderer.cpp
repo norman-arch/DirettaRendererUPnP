@@ -661,7 +661,7 @@ callbacks.onStop = [&lastStopTime, this]() {
     }
 };
 
-callbacks.onSeek = [this](const std::string& target) {  // ⭐ Enlever unit
+callbacks.onSeek = [this](const std::string& target) {
     std::lock_guard<std::mutex> lock(m_mutex);  // Serialize UPnP actions
     std::cout << "════════════════════════════════════════" << std::endl;
     std::cout << "[DirettaRenderer] 🔍 SEEK REQUESTED" << std::endl;
@@ -673,21 +673,56 @@ callbacks.onSeek = [this](const std::string& target) {  // ⭐ Enlever unit
         double seconds = parseTimeString(target);
         
         std::cout << "[DirettaRenderer] Parsed time: " << seconds << "s" << std::endl;
-        // Seek dans AudioEngine
+        
+        // ═══════════════════════════════════════════════════════════
+        // 1. Seek dans AudioEngine (repositionne le fichier source)
+        // ═══════════════════════════════════════════════════════════
         if (m_audioEngine) {
             std::cout << "[DirettaRenderer] Seeking AudioEngine..." << std::endl;
             if (!m_audioEngine->seek(seconds)) {
                 std::cerr << "[DirettaRenderer] ❌ AudioEngine seek failed" << std::endl;
                 return;
             }
-            DEBUG_LOG("[DirettaRenderer] ✓ Seek request sent to AudioEngine (async)");        }
+            DEBUG_LOG("[DirettaRenderer] ✓ AudioEngine seek completed");
+        }
         
-            DEBUG_LOG("[DirettaRenderer] ✓ Seek complete");
+        // ═══════════════════════════════════════════════════════════
+        // ⭐ 2. NOUVEAU: Synchroniser DirettaOutput SyncBuffer (SDK)
+        // ═══════════════════════════════════════════════════════════
+        // CRITIQUE: Le SyncBuffer du SDK Diretta doit être informé
+        // de la nouvelle position, sinon il pense toujours être à
+        // l'ancienne position → son altéré/distordu !
+        // ═══════════════════════════════════════════════════════════
+        
+        if (m_direttaOutput && m_audioEngine) {
+            const TrackInfo& info = m_audioEngine->getCurrentTrackInfo();
+            
+            // Calculer la position en samples
+            // Pour DSD: sampleRate est en bits/s (ex: 2822400 pour DSD64)
+            // Pour PCM: sampleRate est en Hz normal (ex: 44100, 96000)
+            int64_t samplePosition = static_cast<int64_t>(seconds * info.sampleRate);
+            
+            std::cout << "[DirettaRenderer] Synchronizing DirettaOutput SyncBuffer..." << std::endl;
+            std::cout << "   Position: " << samplePosition << " samples (" << seconds << "s)" << std::endl;
+            std::cout << "   Format: " << info.sampleRate << " Hz, " 
+                      << info.channels << " ch" 
+                      << (info.isDSD ? " (DSD)" : " (PCM)") << std::endl;
+            
+            // Appeler DirettaOutput::seek() pour synchroniser le SyncBuffer SDK
+            if (m_direttaOutput->seek(samplePosition)) {
+                std::cout << "[DirettaRenderer] ✓ DirettaOutput SyncBuffer synchronized" << std::endl;
+            } else {
+                std::cerr << "[DirettaRenderer] ⚠️  DirettaOutput seek failed" << std::endl;
+                // Continue quand même - le seek AudioEngine a réussi
+            }
+        }
+        
+        DEBUG_LOG("[DirettaRenderer] ✓ Seek complete");
         
     } catch (const std::exception& e) {
         std::cerr << "❌ Exception in Seek callback: " << e.what() << std::endl;
     }
-	};
+};
         
 
 m_upnp->setCallbacks(callbacks);       
