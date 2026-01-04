@@ -577,10 +577,10 @@ size_t AudioDecoder::readSamples(AudioBuffer& buffer, size_t numSamples,
         }
 
 
-    // ✅ DEBUG: Dump first 64 bytes to understand Audirvana's format
+    // ✅ DEBUG: Dump first 64 bytes for analysis
     if (g_verbose) {
     if (!m_dumpedFirstPacket && totalBytesRead >= 64) {
-        std::cout << "\n[DEBUG] First 64 bytes from Audirvana DFF:" << std::endl;
+        std::cout << "\n[DEBUG] First 64 bytes(DSD data)" << std::endl;
         std::cout << "[DEBUG] Hex dump:" << std::endl;
         
         const uint8_t* data = buffer.data();
