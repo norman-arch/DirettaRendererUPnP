@@ -1103,39 +1103,15 @@ bool DirettaOutput::configureDiretta(const AudioFormat& format) {
     }
     
     // ════════════════════════════════════════════════════════════════
-    // ⭐ v1.2.3 : Envoyer silence buffers APRÈS connexion
+    // ⭐ v1.2.3 : Silence buffers supprimés
+    // Inutiles car on fait toujours close()/reopen() pour les changements de format
+    // Le DAC se réinitialise automatiquement
     // ════════════════════════════════════════════════════════════════
     
-    if (isFormatChange) {
-        DEBUG_LOG("[DirettaOutput] 🔇 Format change detected, sending " 
-                  << silenceCount << " silence buffers...");
-        DEBUG_LOG("[DirettaOutput]   Previous: 0x" << std::hex 
-                  << static_cast<uint32_t>(previousFormat) << std::dec);
-        DEBUG_LOG("[DirettaOutput]   New: 0x" << std::hex 
-                  << static_cast<uint32_t>(formatID) << std::dec);
-        
-        // Envoyer silence buffers
-        for (int i = 0; i < silenceCount; i++) {
-            DIRETTA::Stream stream;
-            stream.resize(8192);
-            std::memset(stream.get(), silenceValue, 8192);
-            m_syncBuffer->setStream(stream);
-            
-            // Petit délai tous les 10 buffers
-            if (i > 0 && i % 10 == 0) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
-            }
-        }
-        
-        // Attendre stabilisation DAC
-        std::this_thread::sleep_for(std::chrono::milliseconds(wasDSD ? 100 : 50));
-        
-        DEBUG_LOG("[DirettaOutput] ✅ Silence buffers sent, DAC stabilized");
-        
-    } else if (isFirstConfiguration) {
-        DEBUG_LOG("[DirettaOutput] ℹ️  First configuration, no silence needed");
+    if (isFirstConfiguration) {
+        DEBUG_LOG("[DirettaOutput] ℹ️  First configuration");
     } else {
-        DEBUG_LOG("[DirettaOutput] ℹ️  Same format, no silence needed");
+        DEBUG_LOG("[DirettaOutput] ℹ️  Format change with close/reopen (no silence needed)");
     }
     
     DEBUG_LOG("[DirettaOutput] ✓ Connected: " << format.sampleRate 
@@ -1143,6 +1119,7 @@ bool DirettaOutput::configureDiretta(const AudioFormat& format) {
     
     return true;
 }
+
 
 // ═══════════════════════════════════════════════════════════════
 // ⭐ v1.2.0 Stable: Network optimization by format
