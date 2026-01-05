@@ -201,22 +201,32 @@ m_audioEngine->setAudioCallback(
         bool needReopen = false;
         bool formatChanged = false;
 
-        // Build current format from callback parameters
+// Build current format from callback parameters
         AudioFormat currentFormat(sampleRate, bitDepth, channels);
         currentFormat.isDSD = trackInfo.isDSD;
         currentFormat.isCompressed = trackInfo.isCompressed;
 
         if (trackInfo.isDSD) {
             currentFormat.bitDepth = 1;  // DSD = 1 bit
-            std::string codec = trackInfo.codec;
-            if (codec.find("lsb") != std::string::npos) {
+            
+            // ⭐ v1.2.1 : Utiliser la détection depuis AudioEngine (plus précise)
+            if (trackInfo.dsdSourceFormat == TrackInfo::DSDSourceFormat::DSF) {
                 currentFormat.dsdFormat = AudioFormat::DSDFormat::DSF;
-                DEBUG_LOG("[Callback] DSD format: DSF (LSB)");
-            } else {
+                DEBUG_LOG("[Callback] DSD format: DSF (LSB) - from file detection");
+            } else if (trackInfo.dsdSourceFormat == TrackInfo::DSDSourceFormat::DFF) {
                 currentFormat.dsdFormat = AudioFormat::DSDFormat::DFF;
-                DEBUG_LOG("[Callback] DSD format: DFF (MSB)");
+                DEBUG_LOG("[Callback] DSD format: DFF (MSB) - from file detection");
+            } else {
+                // Fallback sur codec string si détection a échoué
+                std::string codec = trackInfo.codec;
+                if (codec.find("lsb") != std::string::npos) {
+                    currentFormat.dsdFormat = AudioFormat::DSDFormat::DSF;
+                    DEBUG_LOG("[Callback] DSD format: DSF (LSB) - from codec fallback");
+                } else {
+                    currentFormat.dsdFormat = AudioFormat::DSDFormat::DFF;
+                    DEBUG_LOG("[Callback] DSD format: DFF (MSB) - from codec fallback");
+                }
             }
-        }
         
         // ═══════════════════════════════════════════════════════════════
         // ⭐ Format change detection (works EVEN after close())
