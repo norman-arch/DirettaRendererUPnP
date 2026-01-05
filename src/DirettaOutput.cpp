@@ -1078,6 +1078,7 @@ DEBUG_LOG("[DirettaOutput] ✓ Connected: " << format.sampleRate
           << "Hz/" << format.bitDepth << "bit/" << format.channels << "ch");
     
 return true;
+}
 // ═══════════════════════════════════════════════════════════════
 // ⭐ v1.2.0 Stable: Network optimization by format
 // ═══════════════════════════════════════════════════════════════
