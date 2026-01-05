@@ -970,8 +970,9 @@ if (format.dsdFormat == AudioFormat::DSDFormat::DFF) {
     }
     std::cout << " " << format.channels << "ch" << std::endl;
 
-    // Détecter si on était en DSD avant le changement
-bool wasDSD = m_isDSD;  // État actuel avant changement
+// Détecter si on était en DSD en regardant le format actuel
+DIRETTA::FormatID currentFormat = m_syncBuffer->getSinkConfigure();
+bool wasDSD = (currentFormat & DIRETTA::FormatID::FMT_DSD1) != 0;
 
 if (wasDSD) {
     // DSD → autre format : envoyer 100 buffers de silence DSD
@@ -980,9 +981,8 @@ if (wasDSD) {
     std::vector<uint8_t> silenceBuffer(8192, 0x69);  // DSD silence = 0x69
     
     for (int i = 0; i < 100; i++) {
-        DIRETTA::Stream stream;
-        stream.set(silenceBuffer.data(), silenceBuffer.size());
-        m_syncBuffer->setStream(stream);
+        // Utiliser setStream directement (pas de Stream.set())
+        m_syncBuffer->setStream(silenceBuffer.data(), silenceBuffer.size());
         
         // Petit délai tous les 10 buffers
         if (i % 10 == 0) {
@@ -1001,9 +1001,7 @@ if (wasDSD) {
     std::vector<uint8_t> silenceBuffer(4096, 0x00);  // PCM silence = 0x00
     
     for (int i = 0; i < 30; i++) {
-        DIRETTA::Stream stream;
-        stream.set(silenceBuffer.data(), silenceBuffer.size());
-        m_syncBuffer->setStream(stream);
+        m_syncBuffer->setStream(silenceBuffer.data(), silenceBuffer.size());
         
         if (i % 10 == 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
