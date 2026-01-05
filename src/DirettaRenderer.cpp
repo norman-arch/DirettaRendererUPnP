@@ -347,22 +347,31 @@ m_audioEngine->setAudioCallback(
             // ⭐ Propagate compression info for buffer optimization
             format.isCompressed = trackInfo.isCompressed;
             
-            // ⭐ Configure DSD if needed
-                if (trackInfo.isDSD) {
-                format.isDSD = true;
-                format.bitDepth = 1;  // DSD = 1 bit
-                format.sampleRate = sampleRate;
-                
-                // Determine DSD format from codec
-                std::string codec = trackInfo.codec;
-                if (codec.find("lsb") != std::string::npos) {
-                format.dsdFormat = AudioFormat::DSDFormat::DSF;
-                DEBUG_LOG("[DirettaRenderer] 🎵 DSD format: DSF (LSB)");
-             } else {
-                format.dsdFormat = AudioFormat::DSDFormat::DFF;
-            DEBUG_LOG("[DirettaRenderer] 🎵 DSD format: DFF (MSB)");
-          }
-      }
+// ⭐ Configure DSD if needed
+if (trackInfo.isDSD) {
+    format.isDSD = true;
+    format.bitDepth = 1;  // DSD = 1 bit
+    format.sampleRate = sampleRate;
+    
+    // ⭐ v1.2.3 : Utiliser la détection depuis AudioEngine (même code que callback)
+    if (trackInfo.dsdSourceFormat == TrackInfo::DSDSourceFormat::DSF) {
+        format.dsdFormat = AudioFormat::DSDFormat::DSF;
+        DEBUG_LOG("[DirettaRenderer] 🎵 DSD format: DSF (LSB) - from file detection");
+    } else if (trackInfo.dsdSourceFormat == TrackInfo::DSDSourceFormat::DFF) {
+        format.dsdFormat = AudioFormat::DSDFormat::DFF;
+        DEBUG_LOG("[DirettaRenderer] 🎵 DSD format: DFF (MSB) - from file detection");
+    } else {
+        // Fallback sur codec string si détection a échoué
+        std::string codec = trackInfo.codec;
+        if (codec.find("lsb") != std::string::npos) {
+            format.dsdFormat = AudioFormat::DSDFormat::DSF;
+            DEBUG_LOG("[DirettaRenderer] 🎵 DSD format: DSF (LSB) - from codec fallback");
+        } else {
+            format.dsdFormat = AudioFormat::DSDFormat::DFF;
+            DEBUG_LOG("[DirettaRenderer] 🎵 DSD format: DFF (MSB) - from codec fallback");
+        }
+    }
+}
             
             if (g_verbose) {
                 std::cout << "[DirettaRenderer] 🔌 Opening Diretta connection: ";
