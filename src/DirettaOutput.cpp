@@ -1082,8 +1082,7 @@ m_syncBuffer->setupBuffer(fs1sec * m_bufferSeconds, 4, false);
         std::cerr << "[DirettaOutput] ❌ Connection failed" << std::endl;
         return false;
     }
-    
-    // ════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════
 // ⭐ v1.2.1 : Silence SEULEMENT lors de VRAIS changements de format
 // ════════════════════════════════════════════════════════════════
 
