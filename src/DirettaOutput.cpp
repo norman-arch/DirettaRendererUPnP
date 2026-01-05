@@ -857,7 +857,7 @@ bool DirettaOutput::configureDiretta(const AudioFormat& format) {
     DEBUG_LOG("[DirettaOutput] Creating new SyncBuffer...");
     m_syncBuffer = std::make_unique<DIRETTA::SyncBuffer>();
   
-    }
+    
   
     // ===== BUILD FORMAT =====
     DIRETTA::FormatID formatID;
