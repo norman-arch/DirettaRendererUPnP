@@ -8,6 +8,9 @@
 #include <memory>
 #include <atomic>
 #include <mutex>
+#include <cmath>       
+#include <algorithm>
+
 
 /**
  * @brief Audio format specification
