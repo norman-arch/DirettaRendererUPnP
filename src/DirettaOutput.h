@@ -47,6 +47,33 @@ struct AudioFormat {
     }
 };
 
+//=============================================================================
+// ⭐ v1.3.0: Dynamic Cycle Time Calculator
+//=============================================================================
+
+class DirettaCycleCalculator {
+public:
+    static constexpr int OVERHEAD = 24;
+    
+    explicit DirettaCycleCalculator(uint32_t mtu = 1500)
+        : m_mtu(mtu), m_efficientMTU(mtu - OVERHEAD) {}
+    
+    unsigned int calculate(uint32_t sampleRate, int channels, int bitsPerSample) const {
+        double bytesPerSecond = static_cast<double>(sampleRate) * 
+                                static_cast<double>(channels) * 
+                                static_cast<double>(bitsPerSample) / 8.0;
+        
+        double cycleTimeUs = (static_cast<double>(m_efficientMTU) / bytesPerSecond) * 1000000.0;
+        
+        unsigned int result = static_cast<unsigned int>(std::round(cycleTimeUs));
+        return std::max(100u, std::min(result, 50000u));
+    }
+    
+private:
+    uint32_t m_mtu;
+    int m_efficientMTU;
+};
+
 /**
  * @brief Diretta output handler
  * 
