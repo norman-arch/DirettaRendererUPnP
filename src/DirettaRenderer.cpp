@@ -140,6 +140,11 @@ bool DirettaRenderer::start() {
             m_direttaOutput->setMTU(m_networkMTU);
         }
         
+        // ⭐ v1.2.0: Configure Gapless Pro mode
+        m_direttaOutput->setGaplessMode(m_config.gaplessEnabled);
+        DEBUG_LOG("[DirettaRenderer] ✓ Gapless mode: " 
+                  << (m_config.gaplessEnabled ? "ENABLED" : "DISABLED"));
+        
         // Create other components
         UPnPDevice::Config upnpConfig;
         upnpConfig.friendlyName = m_config.name;
@@ -167,12 +172,16 @@ m_audioEngine->setAudioCallback(
         // RAII guard - clears flag on any exit path
         struct CallbackGuard {
             DirettaRenderer* self;
+            bool manuallyReleased = false;  // ⭐ v1.2.0 Stable: Support manual release
+            
             ~CallbackGuard() {
-                {
-                    std::lock_guard<std::mutex> lk(self->m_callbackMutex);
-                    self->m_callbackRunning = false;
+                if (!manuallyReleased) {  // ⭐ Only release if not done manually
+                    {
+                        std::lock_guard<std::mutex> lk(self->m_callbackMutex);
+                        self->m_callbackRunning = false;
+                    }
+                    self->m_callbackCV.notify_all();
                 }
-                self->m_callbackCV.notify_all();
             }
         } guard{this};
 
@@ -192,23 +201,33 @@ m_audioEngine->setAudioCallback(
         bool needReopen = false;
         bool formatChanged = false;
 
-        // Build current format from callback parameters
+// Build current format from callback parameters
         AudioFormat currentFormat(sampleRate, bitDepth, channels);
         currentFormat.isDSD = trackInfo.isDSD;
         currentFormat.isCompressed = trackInfo.isCompressed;
 
         if (trackInfo.isDSD) {
             currentFormat.bitDepth = 1;  // DSD = 1 bit
-            std::string codec = trackInfo.codec;
-            if (codec.find("lsb") != std::string::npos) {
+            
+            // ⭐ v1.2.1 : Utiliser la détection depuis AudioEngine (plus précise)
+            if (trackInfo.dsdSourceFormat == TrackInfo::DSDSourceFormat::DSF) {
                 currentFormat.dsdFormat = AudioFormat::DSDFormat::DSF;
-                DEBUG_LOG("[Callback] DSD format: DSF (LSB)");
-            } else {
+                DEBUG_LOG("[Callback] DSD format: DSF (LSB) - from file detection");
+            } else if (trackInfo.dsdSourceFormat == TrackInfo::DSDSourceFormat::DFF) {
                 currentFormat.dsdFormat = AudioFormat::DSDFormat::DFF;
-                DEBUG_LOG("[Callback] DSD format: DFF (MSB)");
+                DEBUG_LOG("[Callback] DSD format: DFF (MSB) - from file detection");
+            } else {
+                // Fallback sur codec string si détection a échoué
+                std::string codec = trackInfo.codec;
+                if (codec.find("lsb") != std::string::npos) {
+                    currentFormat.dsdFormat = AudioFormat::DSDFormat::DSF;
+                    DEBUG_LOG("[Callback] DSD format: DSF (LSB) - from codec fallback");
+                } else {
+                    currentFormat.dsdFormat = AudioFormat::DSDFormat::DFF;
+                    DEBUG_LOG("[Callback] DSD format: DFF (MSB) - from codec fallback");
+                }
             }
         }
-        
         // ═══════════════════════════════════════════════════════════════
         // ⭐ Format change detection (works EVEN after close())
         // ═══════════════════════════════════════════════════════════════
@@ -231,31 +250,31 @@ m_audioEngine->setAudioCallback(
                           << (currentFormat.isDSD ? " DSD" : " PCM") << std::endl;
                 std::cout << "════════════════════════════════════════" << std::endl;
                 
-                // ⭐⭐⭐ USE changeFormat() FOR PROPER TRANSITION ⭐⭐⭐
+                // ⭐ v1.2.0 Stable: Release callback flag BEFORE long operations
+                {
+                    std::lock_guard<std::mutex> lk(m_callbackMutex);
+                    m_callbackRunning = false;
+                    guard.manuallyReleased = true;  // Prevent double release
+                }
+                m_callbackCV.notify_all();
+                DEBUG_LOG("[Callback] ✓ Callback flag released early (anti-deadlock)");
+                
+                // ⭐⭐⭐ v1.2.0 FIXED: SDK Gapless Pro handles EVERYTHING ⭐⭐⭐
                 std::cout << "[Callback] 🔄 Executing format change sequence..." << std::endl;
+                std::cout << "[Callback] 💡 SDK Diretta manages drain/disconnect/reconnect internally" << std::endl;
                 
-                // STEP 1: Stop playback (graceful drain)
-                std::cout << "[Callback]    1. Stopping and draining buffers..." << std::endl;
-                m_direttaOutput->stop(false);  // ✅ false = graceful drain
-                
-                // STEP 2: Change format
-                std::cout << "[Callback]    2. Changing format..." << std::endl;
+                // ✅ STEP 1: Change format (SDK handles stop/drain/disconnect/reconfigure)
+                std::cout << "[Callback]    1. Changing format (SDK-managed transition)..." << std::endl;
                 if (!m_direttaOutput->changeFormat(currentFormat)) {
                     std::cerr << "[Callback] ❌ Format change failed!" << std::endl;
                     m_direttaOutput->close();
                     return false;
                 }
                 
-                // STEP 3: Restart playback
-                std::cout << "[Callback]    3. Restarting playback..." << std::endl;
-                if (!m_direttaOutput->play()) {
-                    std::cerr << "[Callback] ❌ Failed to restart!" << std::endl;
-                    return false;
-                }
                 
-                // STEP 4: Wait for DAC lock
-                std::cout << "[Callback]    4. Waiting for DAC lock (300ms)..." << std::endl;
-                std::this_thread::sleep_for(std::chrono::milliseconds(600));
+                // ✅ STEP 2: Wait for DAC lock (changeFormat already called play)
+                std::cout << "[Callback]    2. Waiting for DAC lock (300ms)..." << std::endl;
+                std::this_thread::sleep_for(std::chrono::milliseconds(300));
                 
                 std::cout << "[Callback] ✅ Format change completed successfully" << std::endl;
                 std::cout << "════════════════════════════════════════" << std::endl;
@@ -328,22 +347,31 @@ m_audioEngine->setAudioCallback(
             // ⭐ Propagate compression info for buffer optimization
             format.isCompressed = trackInfo.isCompressed;
             
-            // ⭐ Configure DSD if needed
-            if (trackInfo.isDSD) {
-                format.isDSD = true;
-                format.bitDepth = 1;  // DSD = 1 bit
-                format.sampleRate = sampleRate;
-                
-                // Determine DSD format from codec
-                std::string codec = trackInfo.codec;
-                if (codec.find("lsb") != std::string::npos) {
-                    format.dsdFormat = AudioFormat::DSDFormat::DSF;
-                    DEBUG_LOG("[DirettaRenderer] 🎵 DSD format: DSF (LSB)");
-                } else {
-                    format.dsdFormat = AudioFormat::DSDFormat::DFF;
-                    DEBUG_LOG("[DirettaRenderer] 🎵 DSD format: DFF (MSB)");
-                }
-            }
+// ⭐ Configure DSD if needed
+if (trackInfo.isDSD) {
+    format.isDSD = true;
+    format.bitDepth = 1;  // DSD = 1 bit
+    format.sampleRate = sampleRate;
+    
+    // ⭐ v1.2.3 : Utiliser la détection depuis AudioEngine (même code que callback)
+    if (trackInfo.dsdSourceFormat == TrackInfo::DSDSourceFormat::DSF) {
+        format.dsdFormat = AudioFormat::DSDFormat::DSF;
+        DEBUG_LOG("[DirettaRenderer] 🎵 DSD format: DSF (LSB) - from file detection");
+    } else if (trackInfo.dsdSourceFormat == TrackInfo::DSDSourceFormat::DFF) {
+        format.dsdFormat = AudioFormat::DSDFormat::DFF;
+        DEBUG_LOG("[DirettaRenderer] 🎵 DSD format: DFF (MSB) - from file detection");
+    } else {
+        // Fallback sur codec string si détection a échoué
+        std::string codec = trackInfo.codec;
+        if (codec.find("lsb") != std::string::npos) {
+            format.dsdFormat = AudioFormat::DSDFormat::DSF;
+            DEBUG_LOG("[DirettaRenderer] 🎵 DSD format: DSF (LSB) - from codec fallback");
+        } else {
+            format.dsdFormat = AudioFormat::DSDFormat::DFF;
+            DEBUG_LOG("[DirettaRenderer] 🎵 DSD format: DFF (MSB) - from codec fallback");
+        }
+    }
+}
             
             if (g_verbose) {
                 std::cout << "[DirettaRenderer] 🔌 Opening Diretta connection: ";
@@ -431,6 +459,37 @@ m_audioEngine->setAudioCallback(
             m_upnp->notifyStateChange("STOPPED");
         });                  
 
+        // ═══════════════════════════════════════════════════════════════
+        // ⭐ v1.2.0: Gapless Pro - Next track callback
+        // ═══════════════════════════════════════════════════════════════
+        
+        m_audioEngine->setNextTrackCallback(
+            [this](const uint8_t* data, size_t samples, const AudioFormat& format) {
+                DEBUG_LOG("[DirettaRenderer] 🎵 Next track callback triggered");
+                DEBUG_LOG("[DirettaRenderer]    Samples: " << samples 
+                          << ", Format: " << format.sampleRate << "Hz/" 
+                          << format.bitDepth << "bit/" << format.channels << "ch");
+                
+                if (m_direttaOutput && m_direttaOutput->isGaplessMode()) {
+                    bool prepared = m_direttaOutput->prepareNextTrack(data, samples, format);
+                    
+                    if (prepared) {
+                        DEBUG_LOG("[DirettaRenderer] ✅ Next track prepared for gapless");
+                    } else {
+                        DEBUG_LOG("[DirettaRenderer] ⚠️  Failed to prepare next track");
+                    }
+                } else {
+                    if (!m_direttaOutput) {
+                        DEBUG_LOG("[DirettaRenderer] ⚠️  DirettaOutput not available");
+                    } else {
+                        DEBUG_LOG("[DirettaRenderer] ℹ️  Gapless mode disabled");
+                    }
+                }
+            }
+        );
+        
+        // ═══════════════════════════════════════════════════════════════
+
         
         // Setup callbacks from UPnP to AudioEngine
   
@@ -442,14 +501,10 @@ UPnPDevice::Callbacks callbacks;
 callbacks.onSetURI = [this](const std::string& uri, const std::string& metadata) {
     DEBUG_LOG("[DirettaRenderer] SetURI: " << uri);
     
-    AudioEngine::State currentState;
+    // ⭐ v1.2.0 FIX: Keep mutex locked (v1.0.9 structure) + timeout prevents deadlock
+    std::lock_guard<std::mutex> lock(m_mutex);
     
-    // ⭐ v1.1.1 FIX: Lock only to READ state, then RELEASE
-    {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        currentState = m_audioEngine->getState();
-    }
-    // ← m_mutex is NOW RELEASED - CRITICAL for avoiding deadlock
+    auto currentState = m_audioEngine->getState();
     
     // ⭐ Auto-STOP if playing (JPlay iOS compatibility - added in v1.0.8)
     if (currentState == AudioEngine::State::PLAYING || 
@@ -464,13 +519,10 @@ callbacks.onSetURI = [this](const std::string& uri, const std::string& metadata)
         std::cout << "[DirettaRenderer] 🛑 Auto-STOP before URI change (JPlay iOS compatibility)" << std::endl;
         std::cout << "════════════════════════════════════════" << std::endl;
 
-        // SYNC: Stop with callback mutex held, then wait for completion
-        {
-            std::lock_guard<std::mutex> cbLock(m_callbackMutex);
-            m_audioEngine->stop();
-        }
+        // Stop audio engine
+        m_audioEngine->stop();
         
-        // ⭐ v1.1.1 FIX: Now SAFE to wait - m_mutex is NOT held
+        // Wait for callback (has 5s timeout built-in, won't deadlock thanks to patch #10)
         waitForCallbackComplete();
 
         // Stop and close DirettaOutput
@@ -489,13 +541,10 @@ callbacks.onSetURI = [this](const std::string& uri, const std::string& metadata)
         DEBUG_LOG("[DirettaRenderer] ✓ Auto-STOP completed");
     }
     
-    // ⭐ v1.1.1: Now acquire mutex AGAIN to safely update URI
-    {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        this->m_currentURI = uri;
-        this->m_currentMetadata = metadata;
-        m_audioEngine->setCurrentURI(uri, metadata);
-    }
+    // Update URI (still under mutex lock - safe!)
+    this->m_currentURI = uri;
+    this->m_currentMetadata = metadata;
+    m_audioEngine->setCurrentURI(uri, metadata);
 };
 
 // CRITICAL: SetNextAVTransportURI pour le gapless
@@ -631,33 +680,34 @@ callbacks.onStop = [&lastStopTime, this]() {
     }
 };
 
-callbacks.onSeek = [this](const std::string& target) {  // ⭐ Enlever unit
-    std::lock_guard<std::mutex> lock(m_mutex);  // Serialize UPnP actions
+callbacks.onSeek = [this](const std::string& target) {
+    std::lock_guard<std::mutex> lock(m_mutex);
     std::cout << "════════════════════════════════════════" << std::endl;
     std::cout << "[DirettaRenderer] 🔍 SEEK REQUESTED" << std::endl;
     std::cout << "   Target: " << target << std::endl;
     std::cout << "════════════════════════════════════════" << std::endl;
     
     try {
-        // Parser le target (format: "HH:MM:SS" ou "HH:MM:SS.mmm")
         double seconds = parseTimeString(target);
-        
         std::cout << "[DirettaRenderer] Parsed time: " << seconds << "s" << std::endl;
-        // Seek dans AudioEngine
+        
+        // Seek dans AudioEngine SEULEMENT
+        // Le SDK Diretta se resynchronisera naturellement
         if (m_audioEngine) {
             std::cout << "[DirettaRenderer] Seeking AudioEngine..." << std::endl;
             if (!m_audioEngine->seek(seconds)) {
                 std::cerr << "[DirettaRenderer] ❌ AudioEngine seek failed" << std::endl;
                 return;
             }
-            DEBUG_LOG("[DirettaRenderer] ✓ Seek request sent to AudioEngine (async)");        }
+            DEBUG_LOG("[DirettaRenderer] ✓ Seek request sent to AudioEngine (async)");
+        }
         
-            DEBUG_LOG("[DirettaRenderer] ✓ Seek complete");
+        DEBUG_LOG("[DirettaRenderer] ✓ Seek complete");
         
     } catch (const std::exception& e) {
         std::cerr << "❌ Exception in Seek callback: " << e.what() << std::endl;
     }
-	};
+};
         
 
 m_upnp->setCallbacks(callbacks);       
@@ -812,35 +862,29 @@ void DirettaRenderer::audioThreadFunc() {
             
             std::this_thread::sleep_until(nextProcessTime);
             
-            bool success = m_audioEngine->process(currentSamplesPerCall);
+bool success = m_audioEngine->process(currentSamplesPerCall);
             
             nextProcessTime += lastInterval;
             
+            // ⭐ Static counters OUTSIDE if/else to avoid shadow variable bug
+            static int failCount = 0;
+            static int totalFails = 0;
+            
             if (!success) {
-                // Compteur pour réduire le spam de logs
-                static int failCount = 0;
-                static int totalFails = 0;
-                
                 failCount++;
                 totalFails++;
                 
-                // Logger seulement tous les 100 échecs (ou le premier)
                 if (failCount == 1 || failCount % 100 == 0) {
                     std::cout << "[Audio Thread] ⚠️  process() returned false"
-                              << " (" << totalFails << " total, " 
+                              << " (" << totalFails << " total, "
                               << failCount << " consecutive)" << std::endl;
                 }
                 
-                // ⭐ CRITICAL FIX: Ajouter une pause pour éviter le spam CPU
-                // Sans cette pause, la boucle repart immédiatement et spam
-                // des milliers de fois par seconde !
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                
-                // Reset le temps de prochain process
                 nextProcessTime = std::chrono::steady_clock::now();
+                
             } else {
                 // Reset le compteur d'échecs consécutifs quand ça réussit
-                static int failCount = 0;
                 failCount = 0;
             }
                    

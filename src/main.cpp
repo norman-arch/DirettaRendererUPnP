@@ -12,7 +12,7 @@
 #include <chrono>
 
 // Version information
-#define RENDERER_VERSION "1.1.2"  // ← MISE À JOUR VERSION
+#define RENDERER_VERSION "1.2.0"  // ⭐ Gapless Pro  // ← MISE À JOUR VERSION
 #define RENDERER_BUILD_DATE __DATE__
 #define RENDERER_BUILD_TIME __TIME__
 // Global renderer instance for signal handler
@@ -62,7 +62,7 @@ DirettaRenderer::Config parseArguments(int argc, char* argv[]) {
     config.threadMode = 1;        // Default: Critical only
     config.cycleTime = 10000;     // Default: 10ms
     config.cycleMinTime = 333;    // Default: 333µs
-    config.infoCycle = 5000;      // Default: 5ms
+    config.infoCycle = 100000;      // Default: 100ms
     config.mtuOverride = 0;       // 0 = auto-detect
     
     // ⭐ NEW: Network interface (empty = auto-detect)
@@ -240,7 +240,7 @@ int main(int argc, char* argv[]) {
     
     // ⭐ Display advanced settings only if modified from defaults
     if (config.threadMode != 1 || config.cycleTime != 10000 || 
-        config.cycleMinTime != 333 || config.infoCycle != 5000 || 
+        config.cycleMinTime != 333 || config.infoCycle != 100000 || 
         config.mtuOverride != 0) {
         std::cout << "\nAdvanced Diretta Settings:" << std::endl;
         if (config.threadMode != 1)
@@ -249,7 +249,7 @@ int main(int argc, char* argv[]) {
             std::cout << "  Cycle Time:  " << config.cycleTime << " µs" << std::endl;
         if (config.cycleMinTime != 333)
             std::cout << "  Cycle Min:   " << config.cycleMinTime << " µs" << std::endl;
-        if (config.infoCycle != 5000)
+        if (config.infoCycle != 100000)
             std::cout << "  Info Cycle:  " << config.infoCycle << " µs" << std::endl;
         if (config.mtuOverride != 0)
             std::cout << "  MTU:         " << config.mtuOverride << " bytes" << std::endl;
