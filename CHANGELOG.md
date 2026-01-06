@@ -1,6 +1,6 @@
 # Changelog
 
-## [1.2.1] - 2026-01-06
+## [1.2.0] - 2026-01-06
 
 ### 🎵 DSD Format Enhancement Thanks to @SwissMontainsBear
 **Improved DSD File Detection**
@@ -25,8 +25,6 @@
 - More accurate seek operations in DSD files
 - Proper file pointer management during playback
 - Improved user experience when scrubbing through DSD tracks
-
-## [1.2.0] - 2025-12-27
 
 ### 🎵 Major Features
 
