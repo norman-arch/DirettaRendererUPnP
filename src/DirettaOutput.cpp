@@ -97,7 +97,7 @@ bool DirettaOutput::open(const AudioFormat& format, int bufferSeconds) {
     if (format.isDSD) {
         // DSD: Minimal buffer optimal (SDK manages sync perfectly)
         // Even 0.02s works great, but we cap at 0.05s for safety
-        effectiveBuffer = std::min(bufferSeconds, 0.05f);
+        effectiveBuffer = std::min(static_cast<float>(bufferSeconds), 0.05f);
         std::cout << "[DirettaOutput] 🎵 DSD mode: minimal buffer " 
                   << effectiveBuffer << "s (SDK-managed)" << std::endl;
         
@@ -1023,8 +1023,8 @@ bool DirettaOutput::configureDiretta(const AudioFormat& format) {
                    static_cast<uint32_t>(DIRETTA::FormatID::FMT_DSD1)) != 0;
     
     // Calculer nombre de silence buffers nécessaires (utilisés plus tard)
-    int silenceCount = wasDSD ? 100 : 30;
-    uint8_t silenceValue = wasDSD ? 0x69 : 0x00;
+    // int silenceCount = wasDSD ? 100 : 30;
+    // uint8_t silenceValue = wasDSD ? 0x69 : 0x00;
     
     // ════════════════════════════════════════════════════════════════
     // Configurer le nouveau format
@@ -1130,7 +1130,7 @@ bool DirettaOutput::configureDiretta(const AudioFormat& format) {
 // ⭐ v1.2.0 Stable: Network optimization by format
 // ═══════════════════════════════════════════════════════════════
 
-void DirettaOutput::optimizeNetworkConfig(const AudioFormat& format) {
+void DirettaOutput::optimizeNetworkConfig(const AudioFormat& /*format*/ {
     if (!m_syncBuffer) {
         return;
     }
