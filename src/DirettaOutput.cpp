@@ -1167,22 +1167,25 @@ bool DirettaOutput::seek(int64_t samplePosition) {
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    // ⚠️  v1.3.0: SEEK NOT SUPPORTED FOR DSD (causes audio distortion)
+    // ⚠️  v1.3.0: DSD SEEK - Accept but don't execute (for client compatibility)
     // ═══════════════════════════════════════════════════════════════════
     if (m_currentFormat.isDSD) {
         std::cout << "══════════════════════════════════════════════════════" << std::endl;
-        std::cout << "[DirettaOutput] ⚠️  SEEK NOT SUPPORTED FOR DSD FILES" << std::endl;
-        std::cout << "[DirettaOutput] " << std::endl;
-        std::cout << "[DirettaOutput] 💡 Workaround:" << std::endl;
-        std::cout << "[DirettaOutput]    1. Stop playback" << std::endl;
-        std::cout << "[DirettaOutput]    2. Seek to desired position" << std::endl;
-        std::cout << "[DirettaOutput]    3. Resume playback" << std::endl;
-        std::cout << "[DirettaOutput] " << std::endl;
-        std::cout << "[DirettaOutput] ℹ️  PCM SEEK works perfectly" << std::endl;
+        std::cout << "[DirettaOutput] ⚠️  DSD SEEK: Command accepted but not executed" << std::endl;
+        std::cout << "[DirettaOutput] ℹ️  Reason: DSD seek causes audio distortion" << std::endl;
+        std::cout << "[DirettaOutput] 💡 For precise positioning: Stop → Seek → Play" << std::endl;
+        std::cout << "[DirettaOutput] 🔄 Playback continues without interruption" << std::endl;
         std::cout << "══════════════════════════════════════════════════════" << std::endl;
         
-        DEBUG_LOG("[DirettaOutput] SEEK rejected for DSD format");
-        return false;
+        DEBUG_LOG("[DirettaOutput] DSD SEEK: No-op (client compatibility)");
+        
+        // Update position tracker even though we don't actually seek
+        // This keeps internal state consistent
+        m_totalSamplesSent = samplePosition;
+        
+        // Return TRUE to satisfy poorly-implemented UPnP clients (e.g., JPLAY iOS)
+        // These clients may crash if seek returns false
+        return true;  // ← Fake success!
     }
 
     // ═══════════════════════════════════════════════════════════════════
