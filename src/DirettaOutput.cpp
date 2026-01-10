@@ -8,6 +8,7 @@
 #include <cstring>
 #include <thread>
 #include <chrono>
+#include <iomanip> 
 // ════════════════════════════════════════════════════════════════
 // ⭐ v1.2.3 : Bit reversal lookup table for DSD MSB<->LSB conversion
 // ════════════════════════════════════════════════════════════════
