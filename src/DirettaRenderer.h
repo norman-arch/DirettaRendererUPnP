@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DirettaOutput.h"
 #include <memory>
 #include <string>
 #include <thread>
